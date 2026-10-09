@@ -104,6 +104,9 @@ pub struct CadApp {
     /// Seconds since the last autosave attempt (desktop SAVETIME timer).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     autosave_accum_s: f64,
+    /// Print-preview image and the `layout@revision` key it was rendered for.
+    pub preview_tex: Option<egui::TextureHandle>,
+    pub preview_key: String,
 }
 
 impl CadApp {
@@ -125,6 +128,8 @@ impl CadApp {
             frame_ms: 0.0,
             quit_requested: false,
             autosave_accum_s: 0.0,
+            preview_tex: None,
+            preview_key: String::new(),
         }
     }
 

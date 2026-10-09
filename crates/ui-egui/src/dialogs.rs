@@ -3,6 +3,7 @@
 //! ([`crate::parametric`]).
 
 use egui::{RichText, vec2};
+use serde_json::{Value, json};
 
 use crate::CadApp;
 use crate::theme::Tokens;
@@ -17,6 +18,7 @@ pub fn show(app: &mut CadApp, ctx: &egui::Context) {
         "qselect" => crate::quick::qselect_dialog(app, ctx, &mut open),
         "parameters" => crate::parametric::parameters_dialog(app, ctx, &mut open),
         "dsettings" => dsettings(app, ctx, &mut open),
+        "preview" => print_preview(app, ctx, &mut open),
         "about" => about(ctx, &mut open),
         "commands" => commands(app, ctx, &mut open),
         "blocks" => blocks(app, ctx, &mut open),
@@ -165,6 +167,76 @@ fn blocks(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
             ui.label(n);
         }
     });
+}
+
+/// Print preview: renders the current plot display list to a PNG through the
+/// engine `preview` command and shows it. Re-renders when the layout changes,
+/// the drawing is edited, or Refresh is pressed.
+fn print_preview(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
+    let id = egui::Id::new("preview_layout");
+    let mut names = vec!["Model".to_string()];
+    if let Ok(d) = app.session.doc() {
+        names.extend(d.layouts.iter().map(|l| l.name.clone()));
+    }
+    let current = app
+        .session
+        .state()
+        .map(|s| match &s.space {
+            cadcraft_doc::Space::Paper(n) => n.clone(),
+            _ => "Model".into(),
+        })
+        .unwrap_or_else(|_| "Model".into());
+    let mut layout = ctx.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| current.clone());
+    if !names.contains(&layout) {
+        layout = current;
+    }
+    let rev = app.session.state().map(|s| s.revision).unwrap_or(0);
+    let key = format!("{layout}@{rev}");
+    let mut refresh = app.preview_key != key || app.preview_tex.is_none();
+    egui::Window::new("Print Preview").open(open).default_size(vec2(720.0, 600.0)).show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Layout");
+            egui::ComboBox::from_id_salt("preview_layout_combo").selected_text(&layout).show_ui(ui, |ui| {
+                for n in &names {
+                    ui.selectable_value(&mut layout, n.clone(), n);
+                }
+            });
+            if ui.button("Refresh").clicked() {
+                refresh = true;
+            }
+        });
+        ui.separator();
+        if refresh {
+            app.preview_tex = None;
+            match app.session.execute("preview", &json!({"layout": layout, "width": 1100})) {
+                Ok(v) => {
+                    let bytes = v.get("data").and_then(Value::as_str).map(cadcraft_engine::cmd::file::base64_decode).unwrap_or_default();
+                    match bytes.and_then(|b| image::load_from_memory(&b).ok()) {
+                        Some(img) => {
+                            let rgba = img.to_rgba8();
+                            let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+                            let px = rgba.into_raw();
+                            let tex = ctx.load_texture("print_preview", egui::ColorImage::from_rgba_unmultiplied([w, h], &px), Default::default());
+                            app.preview_tex = Some(tex);
+                            app.preview_key = key.clone();
+                        }
+                        None => app.session.echo("Print Preview: could not render that layout.".to_string()),
+                    }
+                }
+                Err(e) => app.session.echo(format!("Print Preview: {e}")),
+            }
+        }
+        if let Some(tex) = &app.preview_tex {
+            let size = tex.size_vec2();
+            let scale = (ui.available_width() / size.x).min(1.0);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.image((tex.id(), size * scale));
+            });
+        } else {
+            ui.label("No preview yet.");
+        }
+    });
+    ctx.data_mut(|d| d.insert_temp(id, layout));
 }
 
 /// The multiline text editor shown while MTEXT asks for its contents.

@@ -806,7 +806,7 @@ fn run_preview(s: &mut Session, p: &Value) -> Result<Value> {
         Space::Model => "Model".to_string(),
         Space::Paper(n) => n.clone(),
     };
-    let meta = json!({ "layout": layout, "width": width_px, "height": height_px, "bytes": bytes.len() });
+    let meta = json!({ "layout": layout, "width": width_px, "height": height_px, "bytes": bytes.len(), "message": format!("Preview of {layout}: {width_px}x{height_px} px.") });
     match str_param(p, "path") {
         Some(_path) => {
             #[cfg(not(target_arch = "wasm32"))]
