@@ -24,6 +24,9 @@ const SESSION_VARS: &[&str] = &[
     "GRIPSIZE",
     "CURSORSIZE",
     "LASTPOINT",
+    "SAVETIME",
+    "ISAVEBAK",
+    "SAVEFILE",
 ];
 
 pub fn get(s: &Session, name: &str) -> Option<Value> {
@@ -49,6 +52,13 @@ pub fn get(s: &Session, name: &str) -> Option<Value> {
         "GRIPSIZE" => json!(st.gripsize),
         "CURSORSIZE" => json!(st.cursorsize),
         "LASTPOINT" => json!([s.last_point.x, s.last_point.y, 0.0]),
+        "SAVETIME" => json!(s.settings.savetime),
+        "ISAVEBAK" => json!(i32::from(s.settings.isavebak)),
+        "SAVEFILE" => {
+            let st = s.state().ok();
+            let base = st.and_then(|d| d.path.clone()).unwrap_or_else(|| st.map(|d| d.title.clone()).unwrap_or_default());
+            json!(crate::cmd::file::recovery_name(&base))
+        }
         "CMDNAMES" => json!(s.running.as_ref().map(|r| r.id.to_ascii_uppercase()).unwrap_or_default()),
         "DWGNAME" => json!(s.state().map(|d| d.title.clone()).unwrap_or_default()),
         "DBMOD" => json!(s.state().map(|d| i32::from(d.is_dirty())).unwrap_or(0)),
@@ -116,6 +126,9 @@ pub fn set(s: &mut Session, name: &str, v: &Value) -> Result<()> {
         "PICKADD" => st.pickadd = as_bool(v).ok_or_else(bad)?,
         "GRIPSIZE" => st.gripsize = as_f64(v).ok_or_else(bad)?.clamp(1.0, 255.0),
         "CURSORSIZE" => st.cursorsize = as_f64(v).ok_or_else(bad)?.clamp(1.0, 100.0),
+        "SAVETIME" => st.savetime = as_f64(v).ok_or_else(bad)?.clamp(0.0, 1440.0),
+        "ISAVEBAK" => st.isavebak = as_bool(v).ok_or_else(bad)?,
+        "SAVEFILE" => return Err(EngineError::BadParams { cmd: "setvar".into(), msg: "SAVEFILE is read-only".into() }),
         _ => {
             let d = s.doc_mut()?;
             let val = match v {

@@ -8,7 +8,7 @@ agent control over MCP, a scriptable CLI, a web build and a free licence.
 
 | Question | Answer |
 |---|---|
-| **How close is an alpha?** | **≈ 75% of the way.** About **50 Opus 5.5 wall-clock hours** remain (≈ 15–20 hours elapsed with 3–4 agents in parallel). |
+| **How close is an alpha?** | **≈ 75% of the way.** About **46 Opus 5.5 wall-clock hours** remain (≈ 15–20 hours elapsed with 3–4 agents in parallel). |
 | **How far is 100% AutoCAD parity?** | **≈ 29% parity overall** (weighted by how much each area matters). About **570 Opus 5.5 wall-clock hours** remain (≈ 150–190 hours elapsed in parallel). |
 | **2D drafting parity** (what most AutoCAD users do every day: M1–M8) | **≈ 55%.** About **245 hours** remain. |
 | **The biggest single gap** | 3D modelling (M11): solids, surfaces, meshes, visual styles and rendering — ≈ 200 hours on its own. |
@@ -34,20 +34,20 @@ A person can do real 2D drafting work in CADCraft and trust it with their files:
 | DXF/DWG round trip of everything above | done for our data; MULTILEADER is written as LEADER + MTEXT; `*D` dimension blocks duplicate on re-save | 6 |
 | Confirmed opening in AutoCAD (black-box check) | not yet confirmed | 4 |
 | Layer Properties Manager (VP overrides, states, filters), QSELECT, Quick Properties | done | — |
-| Autosave, crash recovery, RECOVER/AUDIT | partial | 6 |
+| Autosave, crash recovery, RECOVER/AUDIT | done (engine): SAVETIME/ISAVEBAK/SAVEFILE sysvars, `autosave` (timer contract: host passes elapsed minutes), AUDIT (repairs layers, linetypes, non-finite geometry), RECOVER, `.bak` on save; desktop auto-timer pending | 2 |
 | Options dialog and preferences | partial | 6 |
 | Plot preview | missing | 4 |
-| Scripted smoke test of all 290 commands through the UI, then fixing what it finds | not started | 12 |
+| Scripted smoke test of all 298 commands through the UI, then fixing what it finds | not started | 12 |
 | Release pipeline: first green signed build on every platform | workflows written; first run being started | 6 |
 | Getting-started docs and the web build hosted | partial | 4 |
-| **Total** | | **≈ 50** |
+| **Total** | | **≈ 46** |
 
 ## Where we are
 
 | Measure | Value |
 |---|---|
 | Menu breadth (`cargo xtask parity`, [docs/parity.md](docs/parity.md)) | **233 / 491 reference menu items (47%)** |
-| Registered commands | 290 (133 with interactive prompts) |
+| Registered commands | 298 (133 with interactive prompts) |
 | **Estimated overall feature parity (weighted by how much each area matters)** | **≈ 29%** |
 | Performance | 200k entities: pick 0.001 ms, pick after an edit ≈ 4 ms (incremental R-tree), GPU canvas ≈ 4 ms per frame |
 | Tests | geometry, colour, document, fonts, render, DXF/DWG round trips, constraints solver, engine (commands, prompts, snaps, selection, undo, scripts, hostile input), MCP agent tasks, xtask |

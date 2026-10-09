@@ -595,32 +595,31 @@ fn parse_entities(recs: &[(String, Vec<Tag>)], d: &mut Drawing, rx: &mut Rx) -> 
                 };
                 kindent = Some((c, k));
             }
-            "INSERT" => {
-                if t.i(66) == Some(1) {
-                    let mut attribs = Vec::new();
-                    while let Some((k2, t2)) = recs.get(i) {
-                        if k2 == "ATTRIB" {
-                            let tt = T(t2);
-                            attribs.push(Attrib {
-                                tag: tt.s(2).unwrap_or_default(),
-                                text: text_from(&tt),
-                                invisible: tt.i(70).unwrap_or(0) & 1 != 0,
-                                constant: false,
-                                prompt: String::new(),
-                            });
+            "INSERT" if t.i(66) == Some(1) => {
+                let mut attribs = Vec::new();
+                while let Some((k2, t2)) = recs.get(i) {
+                    if k2 == "ATTRIB" {
+                        let tt = T(t2);
+                        attribs.push(Attrib {
+                            tag: tt.s(2).unwrap_or_default(),
+                            text: text_from(&tt),
+                            invisible: tt.i(70).unwrap_or(0) & 1 != 0,
+                            constant: false,
+                            prompt: String::new(),
+                        });
+                        i += 1;
+                    } else {
+                        if k2 == "SEQEND" {
                             i += 1;
-                        } else {
-                            if k2 == "SEQEND" {
-                                i += 1;
-                            }
-                            break;
                         }
-                    }
-                    if let Some((_, EntityKind::Insert(ins))) = kindent.as_mut() {
-                        ins.attribs = attribs;
+                        break;
                     }
                 }
+                if let Some((_, EntityKind::Insert(ins))) = kindent.as_mut() {
+                    ins.attribs = attribs;
+                }
             }
+            "INSERT" => {}
             "SEQEND" | "VERTEX" | "ATTRIB" => continue,
             _ => {}
         }

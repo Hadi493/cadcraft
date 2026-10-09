@@ -1,6 +1,30 @@
 use crate::*;
 use cadcraft_geom::{Mat3, Vec2, Vec3};
 
+#[test]
+fn finite_check_catches_nan_in_any_variant() {
+    assert!(line((0.0, 0.0), (10.0, 5.0)).is_finite());
+    assert!(EntityKind::Unknown(Unknown { dxf_type: "ACAD_PROXY".into(), tags: vec![] }).is_finite());
+    assert!(!EntityKind::Circle(Circle { center: Vec3::ZERO, radius: f64::NAN }).is_finite());
+    assert!(!EntityKind::Circle(Circle { center: Vec3::ZERO, radius: f64::INFINITY }).is_finite());
+    assert!(!EntityKind::Arc(Arc { center: Vec3::ZERO, radius: 1.0, start: 0.0, end: f64::NAN }).is_finite());
+    assert!(!line((0.0, 0.0), (f64::NAN, 5.0)).is_finite());
+    assert!(
+        !EntityKind::Table(Table {
+            insert: Vec3::ZERO,
+            col_widths: vec![10.0, f64::NAN],
+            row_heights: vec![5.0],
+            cells: vec![],
+            style: "Standard".into(),
+            text_height: 0.18,
+            title: false,
+            header: false,
+        })
+        .is_finite()
+    );
+    assert!(line((1e308, 0.0), (10.0, 5.0)).is_finite(), "extreme but finite values are not corruption");
+}
+
 fn line(a: (f64, f64), b: (f64, f64)) -> EntityKind {
     EntityKind::Line(Line { a: Vec3::new(a.0, a.1, 0.0), b: Vec3::new(b.0, b.1, 0.0) })
 }

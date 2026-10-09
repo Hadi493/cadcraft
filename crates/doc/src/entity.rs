@@ -642,6 +642,96 @@ impl EntityKind {
         }
     }
 
+    /// True when every stored coordinate is finite (no NaN or infinity).
+    /// Used by AUDIT to find corrupt entities from hostile files.
+    pub fn is_finite(&self) -> bool {
+        fn f(x: f64) -> bool {
+            x.is_finite()
+        }
+        fn v2(p: &Vec2) -> bool {
+            f(p.x) && f(p.y)
+        }
+        fn v3(p: &Vec3) -> bool {
+            f(p.x) && f(p.y) && f(p.z)
+        }
+        fn pv(p: &PolyVertex) -> bool {
+            v2(&p.p) && f(p.bulge) && f(p.start_width) && f(p.end_width)
+        }
+        fn text(t: &Text) -> bool {
+            v3(&t.insert) && t.align_pt.as_ref().is_none_or(v3) && f(t.height) && f(t.rotation) && f(t.width_factor) && f(t.oblique)
+        }
+        fn mtext(t: &MText) -> bool {
+            v3(&t.insert) && f(t.height) && f(t.width) && f(t.rotation) && f(t.line_spacing)
+        }
+        fn assoc(a: &AssocSnap) -> bool {
+            match a {
+                AssocSnap::OnCircle { angle } => f(*angle),
+                AssocSnap::Start
+                | AssocSnap::End
+                | AssocSnap::Mid
+                | AssocSnap::Center
+                | AssocSnap::Vertex { .. }
+                | AssocSnap::Intersection { .. } => true,
+            }
+        }
+        fn json_value(v: &serde_json::Value) -> bool {
+            match v {
+                serde_json::Value::Number(n) => n.as_f64().is_some_and(f),
+                serde_json::Value::Array(a) => a.iter().all(json_value),
+                serde_json::Value::Object(m) => m.values().all(json_value),
+                _ => true,
+            }
+        }
+        match self {
+            EntityKind::Line(l) => v3(&l.a) && v3(&l.b),
+            EntityKind::Point(p) => v3(&p.p) && f(p.angle),
+            EntityKind::Circle(c) => v3(&c.center) && f(c.radius),
+            EntityKind::Arc(a) => v3(&a.center) && f(a.radius) && f(a.start) && f(a.end),
+            EntityKind::Ellipse(e) => v3(&e.center) && v3(&e.major) && f(e.ratio) && f(e.start) && f(e.end),
+            EntityKind::LwPolyline(p) => p.vertices.iter().all(pv) && f(p.const_width) && f(p.elevation),
+            EntityKind::Polyline3d(p) => p.points.iter().all(v3),
+            EntityKind::Spline(sp) => sp.knots.iter().all(|k| f(*k)) && sp.control.iter().all(v2) && sp.weights.iter().all(|w| f(*w)),
+            EntityKind::Ray(r) | EntityKind::XLine(r) => v3(&r.base) && v3(&r.dir),
+            EntityKind::Text(t) => text(t),
+            EntityKind::MText(t) => mtext(t),
+            EntityKind::AttDef(a) => text(&a.text),
+            EntityKind::Insert(i) => {
+                v3(&i.insert) && v3(&i.scale) && f(i.rotation) && f(i.col_spacing) && f(i.row_spacing) && i.attribs.iter().all(|a| text(&a.text))
+            }
+            EntityKind::Dimension(d) => {
+                let kind_ok = match d.kind {
+                    DimKind::Linear { rotation } => f(rotation),
+                    DimKind::Ordinate { .. } => true,
+                    DimKind::Aligned | DimKind::Angular | DimKind::Angular3P | DimKind::Diameter | DimKind::Radius | DimKind::ArcLength => true,
+                };
+                kind_ok
+                    && v3(&d.defpt)
+                    && v3(&d.text_mid)
+                    && v3(&d.p13)
+                    && v3(&d.p14)
+                    && v3(&d.p15)
+                    && v3(&d.p16)
+                    && f(d.measurement)
+                    && f(d.text_rotation)
+                    && d.overrides.values().all(json_value)
+                    && d.assoc.iter().all(|a| assoc(&a.snap))
+            }
+            EntityKind::Leader(l) => l.vertices.iter().all(v3),
+            EntityKind::MLeader(m) => {
+                m.leaders.iter().flatten().all(v3) && v3(&m.landing) && f(m.dogleg) && m.text.as_ref().is_none_or(mtext) && f(m.arrow_size)
+            }
+            EntityKind::Hatch(h) => h.loops.iter().flat_map(|l| &l.vertices).all(pv) && f(h.scale) && f(h.angle) && f(h.elevation) && v2(&h.origin),
+            EntityKind::Solid(s) | EntityKind::Trace(s) => s.corners.iter().all(v3),
+            EntityKind::Face3d(fc) => fc.corners.iter().all(v3),
+            EntityKind::Viewport(v) => v3(&v.center) && f(v.width) && f(v.height) && v2(&v.view_center) && f(v.view_height),
+            EntityKind::Image(i) => v3(&i.insert) && v3(&i.u) && v3(&i.v) && v2(&i.size),
+            EntityKind::Wipeout(w) => w.boundary.iter().all(v2),
+            EntityKind::Table(t) => v3(&t.insert) && t.col_widths.iter().all(|w| f(*w)) && t.row_heights.iter().all(|h| f(*h)) && f(t.text_height),
+            // Raw DXF tags are (code, string) pairs: nothing to be non-finite.
+            EntityKind::Unknown(_) => true,
+        }
+    }
+
     /// Geometric primitives in WCS (2D projection). Text/blocks/dimensions return their
     /// insertion points only; their full geometry comes from the renderer's expansion.
     pub fn prims(&self) -> Vec<Prim> {

@@ -89,6 +89,8 @@ pub struct DocState {
     pub title: String,
     pub saved: Arc<Drawing>,
     pub revision: u64,
+    /// Revision at the last save or autosave (recovery data is current when equal).
+    pub autosave_rev: u64,
     pub space: Space,
     /// MSPACE: the layout viewport whose model space is being edited (None = paper space).
     pub mspace: Option<Handle>,
@@ -112,6 +114,7 @@ impl DocState {
             path,
             title: title.into(),
             revision: 1,
+            autosave_rev: 1,
             space: Space::Model,
             mspace: None,
             views: Vec::new(),
@@ -238,6 +241,10 @@ pub struct Settings {
     pub annoautoscale: bool,
     /// QPMODE: show the Quick Properties palette when objects are selected.
     pub qpmode: bool,
+    /// SAVETIME: minutes between automatic saves (0 = off).
+    pub savetime: f64,
+    /// ISAVEBAK: create a `.bak` backup when saving over an existing file.
+    pub isavebak: bool,
 }
 
 impl Default for Settings {
@@ -267,6 +274,8 @@ impl Default for Settings {
             annoallvisible: true,
             annoautoscale: false,
             qpmode: false,
+            savetime: 10.0,
+            isavebak: true,
         }
     }
 }
