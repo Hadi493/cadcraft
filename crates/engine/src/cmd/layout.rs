@@ -68,6 +68,10 @@ pub fn specs() -> Vec<CommandSpec> {
             .menu(&["File", "Export to PDF..."])
             .params("{path? (else returns base64 `data`), layout?, paper?, landscape?, fit?, lineweights?}")
             .noundo(),
+        CommandSpec::new("preview", "Print Preview", run_preview)
+            .menu(&["File", "Print Preview"])
+            .params("{layout?: current|\"Model\", width?: px (default 1200), path?} → {layout, width, height, bytes, path?|data?}")
+            .noundo(),
         CommandSpec::new("mspace", "Model Space (in viewport)", run_mspace)
             .alias(&["ms"])
             .params("{handle?: viewport, at?: [x,y] paper point inside a viewport} (default: the last active or first viewport)")
@@ -773,6 +777,59 @@ fn run_plot(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
     }
 }
 
+/// Print preview: rasterize what PLOT would put on paper (plot display list,
+/// white sheet) to PNG. Needs no IO hooks: the rasteriser is an engine
+/// dependency, so this works headless, over MCP and on the web.
+fn run_preview(s: &mut Session, p: &Value) -> Result<Value> {
+    let space = match str_param(p, "layout") {
+        Some(n) if n.eq_ignore_ascii_case("model") => Space::Model,
+        Some(n) => Space::Paper(layout_name("preview", s.doc()?, n)?),
+        None => s.space(),
+    };
+    let width_px = p.get("width").and_then(Value::as_f64).filter(|v| v.is_finite()).map(|v| v.clamp(16.0, 4096.0) as u32).unwrap_or(1200);
+    let d = s.doc()?;
+    let list = cadcraft_render::build_plot(d, &space, &cadcraft_render::Options::default());
+    let (view, height_px) = match &space {
+        Space::Paper(n) => {
+            let sheet = cadcraft_render::sheet(d, n).ok_or_else(|| bad("preview", format!("no sheet for layout `{n}`")))?;
+            let height_px = (f64::from(width_px) * sheet.size.y / sheet.size.x.max(1e-9)).clamp(16.0, 4096.0) as u32;
+            (cadcraft_render::raster::View::fit(&sheet.bounds(), width_px, height_px, 0.02), height_px)
+        }
+        Space::Model => {
+            let height_px = (f64::from(width_px) * 2.0 / 3.0).clamp(16.0, 4096.0) as u32;
+            (cadcraft_render::raster::View::fit(&list.bounds, width_px, height_px, 0.05), height_px)
+        }
+    };
+    let opts = cadcraft_render::raster::RasterOptions { background: cadcraft_color::Rgb(255, 255, 255), ..Default::default() };
+    let bytes = cadcraft_render::raster::render_png(&list, &view, &opts).ok_or_else(|| bad("preview", "render failed"))?;
+    let layout = match &space {
+        Space::Model => "Model".to_string(),
+        Space::Paper(n) => n.clone(),
+    };
+    let meta = json!({ "layout": layout, "width": width_px, "height": height_px, "bytes": bytes.len() });
+    match str_param(p, "path") {
+        Some(_path) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let path = _path;
+                let tmp = format!("{path}.cadcraft-tmp");
+                std::fs::write(&tmp, &bytes).map_err(|e| bad("preview", format!("{path}: {e}")))?;
+                std::fs::rename(&tmp, path).map_err(|e| bad("preview", format!("{path}: {e}")))?;
+                let mut v = meta;
+                v["path"] = json!(path);
+                Ok(v)
+            }
+            #[cfg(target_arch = "wasm32")]
+            Err(bad("preview", "paths are not available on the web; omit `path` to get the PNG as base64 `data`"))
+        }
+        None => {
+            let mut v = meta;
+            v["data"] = json!(base64_encode(&bytes));
+            Ok(v)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,6 +1002,14 @@ mod tests {
         Ok(format!("%PDF-1.4 fake {space:?} {opts}").into_bytes())
     }
 
+    fn png_size(data: &str) -> (u32, u32) {
+        let bytes = super::super::file::base64_decode(data).unwrap();
+        assert_eq!(&bytes[0..8], &[137, 80, 78, 71, 13, 10, 26, 10], "PNG magic");
+        let w = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let h = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        (w, h)
+    }
+
     #[test]
     fn plot_goes_through_the_hook() {
         super::super::file::set_io(super::super::file::IoHooks {
@@ -972,6 +1037,60 @@ mod tests {
             assert!(std::fs::read(&path).unwrap().starts_with(b"%PDF"));
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    #[test]
+    fn preview_model_png() {
+        let mut s = session_with_model();
+        let r = s.execute("preview", &json!({})).unwrap();
+        assert_eq!(r["layout"], "Model");
+        assert_eq!(png_size(r["data"].as_str().unwrap()), (1200, 800));
+        assert!(r["bytes"].as_u64().unwrap() > 1000);
+        // Deterministic: the same drawing previews identically.
+        let r2 = s.execute("preview", &json!({})).unwrap();
+        assert_eq!(r["data"], r2["data"]);
+    }
+
+    #[test]
+    fn preview_layout_matches_sheet() {
+        let mut s = session_with_model();
+        // Imperial default page is ANSI A landscape: 11 x 8.5 paper units.
+        let r = s.execute("preview", &json!({"layout": "Layout1"})).unwrap();
+        assert_eq!(r["layout"], "Layout1");
+        assert_eq!(png_size(r["data"].as_str().unwrap()), (1200, 927));
+        let r = s.execute("preview", &json!({"layout": "Layout1", "width": 600})).unwrap();
+        assert_eq!(png_size(r["data"].as_str().unwrap()), (600, 463));
+        assert!(s.execute("preview", &json!({"layout": "Nope"})).is_err());
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = std::env::temp_dir().join(format!("cadcraft-preview-test-{}.png", std::process::id()));
+            let ps = path.to_string_lossy().to_string();
+            let r = s.execute("preview", &json!({"layout": "Layout1", "path": ps})).unwrap();
+            assert!(r["bytes"].as_u64().unwrap() > 1000);
+            assert_eq!(&std::fs::read(&path).unwrap()[1..4], b"PNG");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[test]
+    fn hostile_preview_params() {
+        let mut s = session_with_model();
+        let long = "x".repeat(5000);
+        for p in [
+            json!(null),
+            json!({"width": -100}),
+            json!({"width": 0}),
+            json!({"width": 1e308}),
+            json!({"width": "huge"}),
+            json!({"layout": ""}),
+            json!({"layout": long}),
+            json!({"layout": "Model"}),
+            json!({"path": long}),
+        ] {
+            let _ = s.execute("preview", &p);
+        }
+        // The session still works afterwards.
+        assert!(s.execute("preview", &json!({})).is_ok());
     }
 
     #[test]
