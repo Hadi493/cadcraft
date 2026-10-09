@@ -420,3 +420,63 @@ fn mleader_and_qdim() {
     let r = s.execute("qdim", &json!({"handles": hs, "at": [0, -2]})).unwrap();
     assert_eq!(r["handles"].as_array().unwrap().len(), 2);
 }
+
+/// Engine-level smoke sweep (ROADMAP alpha item, first slice): every registered
+/// command must accept empty and hostile JSON without panicking. A panic would
+/// surface as `EngineError::Internal` via the `execute` guard; any occurrence
+/// fails the test naming the command. The UI-driven sweep is still pending.
+#[test]
+fn all_commands_never_panic() {
+    use cadcraft_doc::Handle;
+    let specs = command_specs();
+    assert!(specs.len() >= 290, "command catalog unexpectedly small: {}", specs.len());
+    let hostile = json!({"__fuzz__": [0, -1, 1e308, "x", true, null, [], {}]});
+    let mut panics: Vec<String> = Vec::new();
+    let mut ok = 0;
+    let mut clean_err = 0;
+    for spec in specs {
+        for params in [Value::Null, json!({}), hostile.clone()] {
+            let mut s = Session::new();
+            // A little content so selection/target commands have something to chew on.
+            let _ = s.execute("line", &json!({"points": [[0, 0], [5, 0]]}));
+            let hs: Vec<Handle> = s.doc().map(|d| d.model.handles()).unwrap_or_default();
+            s.set_selection(hs);
+            match s.execute(spec.id, &params) {
+                Ok(_) => ok += 1,
+                Err(EngineError::Internal(cmd, msg)) => panics.push(format!("{cmd}: {msg}")),
+                Err(_) => clean_err += 1,
+            }
+        }
+    }
+    assert!(panics.is_empty(), "commands panicked ({}): {:?}", panics.len(), panics);
+    assert!(ok + clean_err > 0);
+}
+
+/// Second sweep axis: starting every interactive command (prompt factories and
+/// their first step run outside `execute`) must not panic either. `start` and
+/// the prompt machinery are panic-guarded, so escapes fail here naming the
+/// command instead of crashing the harness.
+#[test]
+fn all_interactive_starts_never_panic() {
+    use cadcraft_doc::Handle;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let specs: Vec<&CommandSpec> = command_specs().iter().filter(|s| s.interactive.is_some()).collect();
+    assert!(!specs.is_empty(), "no interactive commands found");
+    let mut panics: Vec<String> = Vec::new();
+    for spec in specs {
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            let mut s = Session::new();
+            let _ = s.execute("line", &json!({"points": [[0, 0], [5, 0]]}));
+            let hs: Vec<Handle> = s.doc().map(|d| d.model.handles()).unwrap_or_default();
+            s.set_selection(hs);
+            let _ = s.start(spec.id);
+            // Poke the prompt machine once, then bail out.
+            let _ = s.input(Input::Cancel);
+            s.cancel();
+        }));
+        if r.is_err() {
+            panics.push(spec.id.to_string());
+        }
+    }
+    assert!(panics.is_empty(), "interactive starts panicked ({}): {:?}", panics.len(), panics);
+}

@@ -8,7 +8,7 @@ agent control over MCP, a scriptable CLI, a web build and a free licence.
 
 | Question | Answer |
 |---|---|
-| **How close is an alpha?** | **≈ 75% of the way.** About **41 Opus 5.5 wall-clock hours** remain (≈ 15–20 hours elapsed with 3–4 agents in parallel). |
+| **How close is an alpha?** | **≈ 75% of the way.** About **37 Opus 5.5 wall-clock hours** remain (≈ 15–20 hours elapsed with 3–4 agents in parallel). |
 | **How far is 100% AutoCAD parity?** | **≈ 29% parity overall** (weighted by how much each area matters). About **570 Opus 5.5 wall-clock hours** remain (≈ 150–190 hours elapsed in parallel). |
 | **2D drafting parity** (what most AutoCAD users do every day: M1–M8) | **≈ 55%.** About **245 hours** remain. |
 | **The biggest single gap** | 3D modelling (M11): solids, surfaces, meshes, visual styles and rendering — ≈ 200 hours on its own. |
@@ -37,10 +37,10 @@ A person can do real 2D drafting work in CADCraft and trust it with their files:
 | Autosave, crash recovery, RECOVER/AUDIT | done: SAVETIME/ISAVEBAK/SAVEFILE sysvars, `autosave` command, desktop SAVETIME timer with wake-ups, AUDIT (repairs layers, linetypes, non-finite geometry), RECOVER, `.bak` on save | — |
 | Options dialog and preferences | partial | 6 |
 | Plot preview | missing | 4 |
-| Scripted smoke test of all 298 commands through the UI, then fixing what it finds | not started | 12 |
+| Scripted smoke test of all 298 commands (engine sweep done: JSON + interactive starts, 2 prompt guards added; UI-driven sweep pending), then fixing what it finds | started | 8 |
 | Release pipeline: first green signed build on every platform | workflows written; first run being started | 6 |
 | Getting-started docs and the web build hosted | partial | 4 |
-| **Total** | | **≈ 41** |
+| **Total** | | **≈ 37** |
 
 ## Where we are
 

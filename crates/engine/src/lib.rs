@@ -520,7 +520,13 @@ impl Session {
         self.echo(format!("Command: {}", spec.id.to_ascii_uppercase()));
         match spec.interactive {
             Some(factory) => {
-                let machine = factory(self)?;
+                // Factories only borrow the session, so a panic cannot corrupt the
+                // drawing; it still becomes a clean error, never a crash.
+                let machine = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| factory(self))) {
+                    Ok(Ok(m)) => m,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => return Err(EngineError::Internal(spec.id.into(), "panic".into())),
+                };
                 let st = self.state()?;
                 let before = st.doc.clone();
                 let selection_before = st.selection.clone();
@@ -622,7 +628,13 @@ impl Session {
                     Err(_) => Err(EngineError::Internal(run.id.clone(), "panic".into())),
                 }
             }
-            None => run.machine.begin(self),
+            None => {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.machine.begin(self)));
+                match r {
+                    Ok(r) => r,
+                    Err(_) => Err(EngineError::Internal(run.id.clone(), "panic".into())),
+                }
+            }
         };
         match step {
             Ok(Step::Continue) => {
