@@ -1,6 +1,6 @@
 //! Drawing → DXF (AC1015 / R2000 structure, readable by every DXF consumer since 2000).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cadcraft_color::Color;
 use cadcraft_doc::*;
@@ -970,15 +970,26 @@ pub fn write(d: &Drawing) -> String {
     let ps_brs: Vec<(String, String, &Layout)> = ps_brs.into_iter().map(|(n, _, l)| (n, w.h(), l)).collect();
     let mut user_blocks: Vec<(String, String, &Block)> = d.blocks.values().map(|b| (b.name.clone(), String::new(), b.as_ref())).collect();
     user_blocks.iter_mut().for_each(|b| b.1 = format!("{:X}", 0));
-    let user_blocks: Vec<(String, String, &Block)> = user_blocks.into_iter().map(|(n, _, b)| (n, w.h(), b)).collect();
+    let mut user_blocks: Vec<(String, String, &Block)> = user_blocks.into_iter().map(|(n, _, b)| (n, w.h(), b)).collect();
     let mut cx = Ctx::default();
-    // Dimension blocks.
+    // Dimension blocks. A dimension that already points at an existing anonymous
+    // block keeps it (stable across re-saves); anything else mints a fresh `*D` name.
     let mut dim_defs: Vec<(String, String, Vec<Entity>)> = Vec::new(); // filled below
     let mut n = 1;
     let all_spaces: Vec<&EntityStore> = std::iter::once(&d.model).chain(d.layouts.iter().map(|l| &l.entities)).collect();
     for st in &all_spaces {
         for e in st.iter() {
             if let EntityKind::Dimension(dm) = &e.kind {
+                if let Some(name) = dm.block.as_deref().filter(|s| !s.is_empty())
+                    && let Some(b) = d.block(name)
+                    && b.anonymous
+                    && !cx.dim_blocks.values().any(|v| v == name)
+                {
+                    let brh = w.h();
+                    cx.dim_blocks.insert(e.handle, name.to_string());
+                    dim_defs.push((name.to_string(), brh, b.entities.iter().map(|x| x.as_ref().clone()).collect()));
+                    continue;
+                }
                 let mut name = format!("*D{n}");
                 while d.block(&name).is_some() {
                     n += 1;
@@ -1239,6 +1250,24 @@ pub fn write(d: &Drawing) -> String {
         }
     }
     w.s(0, "ENDTAB");
+    // Drop stale anonymous `*D` blocks: without this every re-save would pile a
+    // freshly generated set next to the ones read back from the previous file.
+    // A `*D` block referenced by a dimension is emitted with that dimension's
+    // definition, so it is dropped here too (single definition wins); a `*D`
+    // block survives in the table only while an INSERT still references it.
+    {
+        let dim_ref: HashSet<String> = cx.dim_blocks.values().map(|x| x.to_ascii_uppercase()).collect();
+        let mut insert_ref: HashSet<String> = HashSet::new();
+        for e in &every {
+            if let EntityKind::Insert(ins) = &e.kind {
+                insert_ref.insert(ins.block.to_ascii_uppercase());
+            }
+        }
+        user_blocks.retain(|(n, _, _)| {
+            let up = n.to_ascii_uppercase();
+            !up.starts_with("*D") || (insert_ref.contains(&up) && !dim_ref.contains(&up))
+        });
+    }
     // BLOCK_RECORD
     let th = table_head(&mut w, "BLOCK_RECORD", 1 + ps_brs.len() + user_blocks.len() + dim_defs.len() + arrow_defs.len() + table_defs.len());
     let br_rec = |w: &mut W, h: &str, name: &str, layout: Option<&str>| {

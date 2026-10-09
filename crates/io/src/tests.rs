@@ -508,6 +508,73 @@ fn dimension_overrides_roundtrip_as_dstyle_xdata() {
     assert_eq!(again.overrides, got.overrides);
 }
 
+/// Lines naming an anonymous `*D` block: its BLOCK (twice: groups 2 and 3), its
+/// BLOCK_RECORD and each dimension referencing it. Stable counts across saves
+/// mean no duplication.
+fn star_d_blocks(text: &str) -> usize {
+    text.lines()
+        .filter(|l| {
+            let t = l.trim();
+            t.len() > 2 && t.starts_with("*D") && t[2..].bytes().all(|b| b.is_ascii_digit())
+        })
+        .count()
+}
+
+fn dim_block_of(d: &Drawing) -> Option<String> {
+    d.model.iter().find_map(|e| if let EntityKind::Dimension(x) = &e.kind { x.block.clone() } else { None })
+}
+
+fn dim_handle_of(d: &Drawing) -> Handle {
+    d.model.iter().find(|e| matches!(e.kind, EntityKind::Dimension(_))).map(|e| e.handle).expect("a dimension")
+}
+
+#[test]
+fn dim_blocks_stable_across_resaves() {
+    let mut d = Drawing::new_imperial();
+    d.add(&Space::Model, Common::default(), EntityKind::Dimension(dim(DimKind::Linear { rotation: 0.0 }, Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0))))
+        .unwrap();
+    let t1 = write_dxf(&d);
+    let c1 = star_d_blocks(&t1);
+    assert!(c1 >= 4, "one *D block, its record and the dimension reference");
+    let d2 = read_dxf(t1.as_bytes()).unwrap();
+    let b1 = dim_block_of(&d2).expect("dimension keeps its *D block");
+    let t2 = write_dxf(&d2);
+    assert_eq!(star_d_blocks(&t2), c1, "re-save must not duplicate *D blocks");
+    let d3 = read_dxf(t2.as_bytes()).unwrap();
+    assert_eq!(dim_block_of(&d3).as_deref(), Some(b1.as_str()), "same block name trip after trip");
+    assert_eq!(star_d_blocks(&write_dxf(&d3)), c1, "third save is stable too");
+}
+
+#[test]
+fn stale_dim_blocks_dropped_on_resave() {
+    let mut d = Drawing::new_imperial();
+    d.add(&Space::Model, Common::default(), EntityKind::Dimension(dim(DimKind::Aligned, Vec3::ZERO, Vec3::new(5.0, 5.0, 0.0)))).unwrap();
+    let mut back = read_dxf(write_dxf(&d).as_bytes()).unwrap();
+    assert!(star_d_blocks(&write_dxf(&back)) > 0);
+    back.remove_entity(dim_handle_of(&back));
+    assert_eq!(star_d_blocks(&write_dxf(&back)), 0, "unreferenced *D blocks are not re-emitted");
+}
+
+#[test]
+fn edited_dimension_regenerates_its_block() {
+    let mut d = Drawing::new_imperial();
+    d.add(&Space::Model, Common::default(), EntityKind::Dimension(dim(DimKind::Linear { rotation: 0.0 }, Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0))))
+        .unwrap();
+    let t1 = write_dxf(&d);
+    let mut back = read_dxf(t1.as_bytes()).unwrap();
+    // Every engine edit path clears `block`, forcing regeneration.
+    let h = dim_handle_of(&back);
+    back.modify_entity(h, |e| {
+        if let EntityKind::Dimension(dm) = &mut e.kind {
+            dm.block = None;
+        }
+    })
+    .unwrap();
+    let t2 = write_dxf(&back);
+    assert_eq!(star_d_blocks(&t2), star_d_blocks(&t1), "one block set in, one block set out");
+    assert!(t2.contains("*D2"), "fresh name; the stale *D1 is dropped");
+}
+
 #[test]
 fn dimension_associativity_roundtrips() {
     let mut d = Drawing::new_imperial();

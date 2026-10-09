@@ -8,7 +8,7 @@ agent control over MCP, a scriptable CLI, a web build and a free licence.
 
 | Question | Answer |
 |---|---|
-| **How close is an alpha?** | **≈ 75% of the way.** About **46 Opus 5.5 wall-clock hours** remain (≈ 15–20 hours elapsed with 3–4 agents in parallel). |
+| **How close is an alpha?** | **≈ 75% of the way.** About **44 Opus 5.5 wall-clock hours** remain (≈ 15–20 hours elapsed with 3–4 agents in parallel). |
 | **How far is 100% AutoCAD parity?** | **≈ 29% parity overall** (weighted by how much each area matters). About **570 Opus 5.5 wall-clock hours** remain (≈ 150–190 hours elapsed in parallel). |
 | **2D drafting parity** (what most AutoCAD users do every day: M1–M8) | **≈ 55%.** About **245 hours** remain. |
 | **The biggest single gap** | 3D modelling (M11): solids, surfaces, meshes, visual styles and rendering — ≈ 200 hours on its own. |
@@ -31,7 +31,7 @@ A person can do real 2D drafting work in CADCraft and trust it with their files:
 | Hatch with pick points, blocks, attributes | done | — |
 | Layouts, viewports, MSPACE/PSPACE, page setup, PLOT to PDF | done | — |
 | Parametric constraints, constraint bars and dimensional constraints on the canvas, Parameters Manager | done | — |
-| DXF/DWG round trip of everything above | done for our data; MULTILEADER is written as LEADER + MTEXT; `*D` dimension blocks duplicate on re-save | 6 |
+| DXF/DWG round trip of everything above | done for our data; MULTILEADER is written as LEADER + MTEXT; `*D` dimension blocks are now stable across re-saves (reused, stale ones dropped) | 4 |
 | Confirmed opening in AutoCAD (black-box check) | not yet confirmed | 4 |
 | Layer Properties Manager (VP overrides, states, filters), QSELECT, Quick Properties | done | — |
 | Autosave, crash recovery, RECOVER/AUDIT | done (engine): SAVETIME/ISAVEBAK/SAVEFILE sysvars, `autosave` (timer contract: host passes elapsed minutes), AUDIT (repairs layers, linetypes, non-finite geometry), RECOVER, `.bak` on save; desktop auto-timer pending | 2 |
@@ -40,7 +40,7 @@ A person can do real 2D drafting work in CADCraft and trust it with their files:
 | Scripted smoke test of all 298 commands through the UI, then fixing what it finds | not started | 12 |
 | Release pipeline: first green signed build on every platform | workflows written; first run being started | 6 |
 | Getting-started docs and the web build hosted | partial | 4 |
-| **Total** | | **≈ 46** |
+| **Total** | | **≈ 44** |
 
 ## Where we are
 
