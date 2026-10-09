@@ -3,12 +3,14 @@
 //! ```text
 //! cadcraft-cli info FILE.dxf                       summary as JSON
 //! cadcraft-cli convert IN.dxf OUT.(dxf|svg|png)    convert / export
-//! cadcraft-cli run [FILE|--sample|--metric] [--script TEXT|--script-file F.scr] [--cmd 'id {json}']... [--save OUT] [--export OUT.png]
+//! cadcraft-cli run [FILE|--sample|--metric] [--script TEXT|--script-file F.scr] [--cmd 'id {json}']... [--save OUT] [--export OUT.png] [--raw]
 //! cadcraft-cli commands [FILTER]                   command catalog (JSON)
 //! cadcraft-cli mcp [--connect HOST:PORT]           MCP server on stdio (headless or bridged to the app)
 //! cadcraft-cli perf [N]                            timing table on a synthetic N-entity drawing
 //! cadcraft-cli sample (bracket|floorplan) OUT       write a built-in sample drawing
 //! ```
+//! `run --cmd` replaces a long base64 `data` field with a short summary so the
+//! terminal is not flooded; pass `--raw` for the full JSON (scripts, piping).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use std::process::ExitCode;
@@ -19,7 +21,7 @@ use serde_json::{Value, json};
 const USAGE: &str = "usage:
   cadcraft-cli info FILE.dxf
   cadcraft-cli convert IN.dxf OUT.(dxf|svg|png)
-  cadcraft-cli run [FILE | --sample | --metric] [--script TEXT] [--script-file F.scr] [--cmd 'id {json}']... [--save OUT.dxf] [--export OUT.(png|svg)]
+  cadcraft-cli run [FILE | --sample | --metric] [--script TEXT] [--script-file F.scr] [--cmd 'id {json}']... [--save OUT.dxf] [--export OUT.(png|svg)] [--raw]
   cadcraft-cli commands [FILTER]
   cadcraft-cli mcp [--connect HOST:PORT]
   cadcraft-cli perf [N]
@@ -67,14 +69,36 @@ fn sample(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Print a command result. A long base64 `data` field (preview/plot/document
+/// payloads) is replaced with a short summary unless `--raw` was passed, so
+/// one command cannot flood the terminal.
+fn print_result(r: &Value, raw: bool) {
+    if raw {
+        println!("{r}");
+        return;
+    }
+    let mut v = r.clone();
+    let summary = v
+        .get("data")
+        .and_then(Value::as_str)
+        .filter(|s| s.len() > 200)
+        .map(|s| format!("<{} chars of base64 data (pass {{\"path\": ...}} to write it to a file, or --raw for full JSON)>", s.len()));
+    if let (Some(o), Some(rep)) = (v.as_object_mut(), summary) {
+        o.insert("data".into(), Value::String(rep));
+    }
+    println!("{v}");
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     let mut s = Session::empty();
     let mut it = args.iter();
     let mut save = None;
     let mut exp = None;
+    let mut raw = false;
     let mut steps: Vec<(String, String)> = Vec::new();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--raw" => raw = true,
             "--sample" => {
                 s.open_drawing(cadcraft_engine::sample::default_sample(), "Bracket", None);
             }
@@ -104,7 +128,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 let params: Value = serde_json::from_str(json).map_err(|e| format!("--cmd {id}: {e}"))?;
                 let r = s.execute(id, &params).map_err(|e| e.to_string())?;
                 if !r.is_null() {
-                    println!("{r}");
+                    print_result(&r, raw);
                 }
             }
         }
