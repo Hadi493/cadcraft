@@ -101,6 +101,9 @@ pub struct CadApp {
     styled: bool,
     pub frame_ms: f64,
     pub quit_requested: bool,
+    /// Seconds since the last autosave attempt (desktop SAVETIME timer).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    autosave_accum_s: f64,
 }
 
 impl CadApp {
@@ -121,6 +124,7 @@ impl CadApp {
             styled: false,
             frame_ms: 0.0,
             quit_requested: false,
+            autosave_accum_s: 0.0,
         }
     }
 
@@ -190,6 +194,32 @@ impl CadApp {
         }
     }
 
+    /// Automatic save on the SAVETIME interval (desktop only: the web build has
+    /// no files to write to). The host owns the wall clock and reports elapsed
+    /// minutes; the engine decides whether saving is needed. A completed save
+    /// is echoed to the command line, anything else stays silent.
+    /// `request_repaint_after` wakes the event loop for the next due save.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn autosave_tick_frame(&mut self, ctx: &egui::Context) {
+        let savetime = self.session.settings.savetime;
+        if savetime > 0.0 && !self.session.docs.is_empty() {
+            let dt = ctx.input(|i| f64::from(i.unstable_dt).max(0.0));
+            let (accum, due) = autosave_tick(self.autosave_accum_s, dt, savetime);
+            self.autosave_accum_s = accum;
+            if let Some(minutes) = due
+                && let Ok(v) = self.session.execute("autosave", &json!({ "minutes": minutes }))
+                && v.get("autosaved").and_then(Value::as_bool).unwrap_or(false)
+                && let Some(m) = v.get("message").and_then(Value::as_str)
+            {
+                self.session.echo(m);
+            }
+            let remaining = (savetime * 60.0 - self.autosave_accum_s).max(0.0);
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining.min(3600.0)));
+        } else {
+            self.autosave_accum_s = 0.0;
+        }
+    }
+
     /// Per-frame logic before layout.
     pub fn logic(&mut self, ctx: &egui::Context) {
         if !self.styled {
@@ -204,6 +234,8 @@ impl CadApp {
         self.collect_screenshots(ctx);
         self.issue_screenshots(ctx);
         menus::shortcuts(self, ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.autosave_tick_frame(ctx);
         #[cfg(not(target_arch = "wasm32"))]
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             let p = f.path().to_string_lossy().to_string();
@@ -340,5 +372,31 @@ pub fn now_ms() -> f64 {
     #[cfg(target_arch = "wasm32")]
     {
         0.0
+    }
+}
+
+/// Autosave timer step: accumulate frame time, and once SAVETIME minutes elapse
+/// report the elapsed minutes so the host can run `autosave`. Pure for tests;
+/// NaN counts as off.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn autosave_tick(accum_s: f64, dt_s: f64, savetime_min: f64) -> (f64, Option<f64>) {
+    if !savetime_min.is_finite() || savetime_min <= 0.0 {
+        return (0.0, None);
+    }
+    let accum = (accum_s + dt_s.max(0.0)).min(1e9);
+    if accum >= savetime_min * 60.0 { (0.0, Some(accum / 60.0)) } else { (accum, None) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::autosave_tick;
+
+    #[test]
+    fn savetime_timer() {
+        assert_eq!(autosave_tick(0.0, 1.0, 0.0), (0.0, None), "SAVETIME 0 is off");
+        assert_eq!(autosave_tick(999.0, 1.0, f64::NAN), (0.0, None), "NaN is off");
+        assert_eq!(autosave_tick(0.0, 60.0, 10.0), (60.0, None));
+        assert_eq!(autosave_tick(599.0, 2.0, 10.0), (0.0, Some(601.0 / 60.0)), "fires and resets");
+        assert_eq!(autosave_tick(0.0, -5.0, 10.0), (0.0, None), "negative frames clamp");
     }
 }
