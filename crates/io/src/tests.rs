@@ -932,3 +932,64 @@ fn mleader_is_written_as_leader_and_mtext() {
     assert!(back.model.iter().any(|e| matches!(e.kind, EntityKind::Leader(_))));
     assert!(back.model.iter().any(|e| matches!(&e.kind, EntityKind::MText(t) if t.contents == "Note")));
 }
+
+/// Synthetic MULTILEADER records shaped like AutoCAD's output (context data with
+/// LEADER / LEADER_LINE sections), built from the published structure.
+fn multileader_dxf(body: &str) -> String {
+    format!(
+        "0\nSECTION\n2\nTABLES\n0\nSTYLE\n5\nAB\n2\nNotes\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nMULTILEADER\n5\nCD\n8\nAnno\n{body}\n0\nENDSEC\n0\nEOF\n"
+    )
+}
+
+#[test]
+fn multileader_imports_text_and_arms() {
+    let text = multileader_dxf(
+        "3\nStandard\n172\n2\n170\n1\n291\n1\n300\nCONTEXT_DATA{\n40\n1.0\n41\n0.5\n140\n0.3\n290\n1\n304\nHello\\PWorld\n340\nAB\n12\n20.0\n22\n10.0\n32\n0.0\n42\n0.5\n43\n0.0\n44\n0.5\n45\n1.0\n171\n4\n296\n0\n302\nLEADER{\n40\n2.0\n10\n15.0\n20\n10.0\n30\n0.0\n11\n1.0\n21\n0.0\n31\n0.0\n304\nLEADER_LINE{\n10\n5.0\n20\n5.0\n30\n0.0\n10\n10.0\n20\n7.0\n30\n0.0\n305\n}\n304\nLEADER_LINE{\n10\n5.0\n20\n5.0\n30\n0.0\n10\n8.0\n20\n2.0\n30\n0.0\n305\n}\n303\n}\n301\n}",
+    );
+    let d = read_dxf(text.as_bytes()).unwrap();
+    assert_eq!(d.model.len(), 1);
+    let (c, m) = d.model.iter().next().map(|e| (&e.common, &e.kind)).unwrap();
+    assert_eq!(c.layer, "Anno");
+    let EntityKind::MLeader(m) = m else { panic!("expected an MLeader, got {}", m.type_name()) };
+    assert_eq!(m.leaders.len(), 2);
+    assert_eq!(m.leaders[0], vec![Vec3::new(5.0, 5.0, 0.0), Vec3::new(10.0, 7.0, 0.0)]);
+    assert_eq!(m.leaders[1], vec![Vec3::new(5.0, 5.0, 0.0), Vec3::new(8.0, 2.0, 0.0)]);
+    assert_eq!(m.landing, Vec3::new(15.0, 10.0, 0.0));
+    assert_eq!(m.dogleg, 2.0);
+    assert_eq!(m.style, "Standard");
+    assert_eq!(m.arrow_size, 0.3);
+    let t = m.text.as_ref().expect("text content");
+    assert_eq!(t.contents, "Hello\\PWorld");
+    assert_eq!(t.insert, Vec3::new(20.0, 10.0, 0.0));
+    assert_eq!(t.height, 0.5);
+    assert_eq!(t.rotation, 0.5);
+    assert_eq!(t.attach, 4);
+    assert_eq!(t.style, "Notes", "style handle resolves through the STYLE table");
+    // And it survives a re-save as visible LEADER + MTEXT instead of vanishing.
+    // (Writer output uses CRLF line ends.)
+    let out = write_dxf(&d);
+    assert!(out.contains("\r\nLEADER\r\n") && out.contains("\r\nMTEXT\r\n"));
+    let back = read_dxf(out.as_bytes()).unwrap();
+    assert!(back.model.iter().any(|e| matches!(e.kind, EntityKind::Leader(_))));
+    assert!(back.model.iter().any(|e| matches!(&e.kind, EntityKind::MText(t) if t.contents == "Hello\\PWorld")));
+}
+
+#[test]
+fn multileader_hostile_sections_never_panic() {
+    // Block content (no text), unbalanced markers, doubled sections and garbage numbers.
+    let mut body = String::from("172\n1\n300\nCONTEXT_DATA{\n290\n0\n296\n1\n302\nLEADER{\n40\nabc\n10\n1.0\n20\nNaN\n30\n0.0\n");
+    for _ in 0..200 {
+        body.push_str("304\nLEADER_LINE{\n10\n1.0\n20\n2.0\n30\n3.0\n305\n}\n");
+    }
+    body.push_str("305\n}\n303\n}\n301\n}\n301\n}\n");
+    let d = read_dxf(multileader_dxf(&body).as_bytes()).unwrap();
+    let m = d.model.iter().find_map(|e| if let EntityKind::MLeader(m) = &e.kind { Some(m) } else { None }).expect("an MLeader");
+    assert!(m.text.is_none(), "block content has no text counterpart yet");
+    assert!(m.leaders.len() <= 64, "arms are capped");
+    assert!(m.leaders.iter().flatten().all(|p| p.x.is_finite() && p.y.is_finite() && p.z.is_finite()));
+    assert!(m.dogleg.is_finite());
+    // Empty MULTILEADER: no leaders, no content — imports as an empty annotation, not an error.
+    let d = read_dxf(multileader_dxf("172\n0\n").as_bytes()).unwrap();
+    assert_eq!(d.model.len(), 1);
+    assert!(matches!(&d.model.iter().next().unwrap().kind, EntityKind::MLeader(m) if m.leaders.is_empty() && m.text.is_none()));
+}

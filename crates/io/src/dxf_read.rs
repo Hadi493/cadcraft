@@ -104,7 +104,7 @@ fn text_from(t: &T) -> Text {
 }
 
 /// Parse one entity record. POLYLINE/INSERT followers are handled by the caller.
-fn entity(kind: &str, tags: &[Tag]) -> Option<(Common, EntityKind)> {
+fn entity(kind: &str, tags: &[Tag], styles: &HashMap<String, String>) -> Option<(Common, EntityKind)> {
     let t = T(tags);
     let c = common(&t);
     let k = match kind {
@@ -266,6 +266,7 @@ fn entity(kind: &str, tags: &[Tag]) -> Option<(Common, EntityKind)> {
                 assoc: Vec::new(),
             })
         }
+        "MULTILEADER" => EntityKind::MLeader(multileader(tags, styles)),
         "LEADER" => EntityKind::Leader(Leader {
             vertices: t.pts(10).into_iter().map(|p| p.to3(0.0)).collect(),
             arrow: t.i(71).unwrap_or(1) != 0,
@@ -309,6 +310,177 @@ fn entity(kind: &str, tags: &[Tag]) -> Option<(Common, EntityKind)> {
     Some((c, k))
 }
 
+/// Innermost MULTILEADER section of each tag: 0 entity level, 1 context data,
+/// 2 leader, 3 leader line. Section markers (`…{`) open the section they name
+/// and `}` closes one level; unbalanced hostile markers are ignored.
+fn mleader_sections(tags: &[Tag]) -> Vec<(u8, &Tag)> {
+    let mut out = Vec::with_capacity(tags.len().min(1_000_000));
+    let mut stack: Vec<u8> = vec![0];
+    for tg in tags {
+        if tg.code == 300 && tg.str() == "CONTEXT_DATA{" {
+            out.push((*stack.last().unwrap_or(&0), tg));
+            if stack.len() < 8 {
+                stack.push(1);
+            }
+            continue;
+        }
+        if tg.code == 302 && tg.str() == "LEADER{" {
+            out.push((*stack.last().unwrap_or(&0), tg));
+            if stack.len() < 8 {
+                stack.push(2);
+            }
+            continue;
+        }
+        if tg.code == 304 && tg.str() == "LEADER_LINE{" {
+            out.push((*stack.last().unwrap_or(&0), tg));
+            if stack.len() < 8 {
+                stack.push(3);
+            }
+            continue;
+        }
+        if matches!(tg.code, 301 | 303 | 305) && tg.str().trim() == "}" {
+            if stack.len() > 1 {
+                stack.pop();
+            }
+            out.push((*stack.last().unwrap_or(&0), tg));
+            continue;
+        }
+        out.push((*stack.last().unwrap_or(&0), tg));
+    }
+    out
+}
+
+/// Assemble ordered 3D points from 10/20/30-style triplets in a tag walk.
+fn triplets(walk: &[(u8, &Tag)], level: u8, base: i32, cap: usize) -> Vec<Vec3> {
+    let mut out = Vec::new();
+    let mut cur: Option<Vec3> = None;
+    for (lv, tg) in walk {
+        if *lv != level {
+            continue;
+        }
+        match tg.code - base {
+            0 => {
+                if let Some(p) = cur.take() {
+                    out.push(p);
+                    if out.len() >= cap {
+                        return out;
+                    }
+                }
+                cur = Some(Vec3::new(tg.f64(), 0.0, 0.0));
+            }
+            10 => {
+                if let Some(p) = cur.as_mut() {
+                    p.y = tg.f64();
+                }
+            }
+            20 => {
+                if let Some(p) = cur.as_mut() {
+                    p.z = tg.f64();
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(p) = cur
+        && out.len() < cap
+    {
+        out.push(p);
+    }
+    out
+}
+
+/// First finite positive float among the given codes, else `dflt`.
+fn first_pos(walk: &[(u8, &Tag)], level: u8, codes: &[i32], dflt: f64) -> f64 {
+    for (lv, tg) in walk {
+        if *lv == level && codes.contains(&tg.code) {
+            let v = tg.f64();
+            if v.is_finite() && v > 0.0 {
+                return v;
+            }
+        }
+    }
+    dflt
+}
+
+/// An AutoCAD MULTILEADER entity → our MLeader: leader arms, landing, dogleg
+/// and text. Block content has no counterpart in our model, so those leaders
+/// keep their arms but no text (still an upgrade over dropping the entity).
+fn multileader(tags: &[Tag], styles: &HashMap<String, String>) -> MLeader {
+    let walk = mleader_sections(tags);
+    let at = |lv: u8, code: i32| walk.iter().find(|(l, t)| *l == lv && t.code == code);
+    // Leader arms: one vertex list per LEADER_LINE section (capped like our writer).
+    let mut arms: Vec<Vec<Vec3>> = Vec::new();
+    let mut cur: Vec<Vec3> = Vec::new();
+    let mut in_line = false;
+    for (lv, tg) in &walk {
+        if tg.code == 304 && tg.str() == "LEADER_LINE{" {
+            if !cur.is_empty() && arms.len() < 64 {
+                arms.push(std::mem::take(&mut cur));
+            }
+            in_line = true;
+            continue;
+        }
+        if matches!(tg.code, 305) {
+            in_line = false;
+            continue;
+        }
+        if in_line && *lv == 3 && matches!(tg.code, 10 | 20 | 30) {
+            match tg.code {
+                10 if cur.len() < 10_000 => cur.push(Vec3::new(tg.f64(), 0.0, 0.0)),
+                20 => {
+                    if let Some(p) = cur.last_mut() {
+                        p.y = tg.f64();
+                    }
+                }
+                30 => {
+                    if let Some(p) = cur.last_mut() {
+                        p.z = tg.f64();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !cur.is_empty() && arms.len() < 64 {
+        arms.push(cur);
+    }
+    // Landing and dogleg come from the first leader (our model holds one of each).
+    let landing = triplets(&walk, 2, 10, 1).into_iter().next().unwrap_or(Vec3::ZERO);
+    let dogleg = at(2, 40).map(|(_, t)| t.f64()).filter(|v| v.is_finite()).unwrap_or(0.0);
+    // Text content (290 flag, type 2, or simply a 304 string present).
+    let contents = at(1, 304).map(|(_, t)| t.str()).filter(|s| !s.is_empty());
+    let has_text = at(1, 290).is_some_and(|(_, t)| t.i64() != 0) || at(0, 172).is_some_and(|(_, t)| t.i64() == 2) || contents.is_some();
+    let text = if has_text {
+        contents.map(|contents| {
+            let loc = triplets(&walk, 1, 12, 1).into_iter().next().unwrap_or(Vec3::ZERO);
+            let style = at(1, 340)
+                .map(|(_, t)| t.str().trim().to_ascii_uppercase())
+                .and_then(|h| styles.get(&h))
+                .cloned()
+                .unwrap_or_else(|| "Standard".into());
+            MText {
+                insert: loc,
+                height: first_pos(&walk, 1, &[44, 41], 0.2).max(1e-9),
+                width: at(1, 43).map(|(_, t)| t.f64()).filter(|v| v.is_finite()).map(|v| v.max(0.0)).unwrap_or(0.0),
+                attach: at(1, 171).map(|(_, t)| t.i64().clamp(1, 9) as u8).unwrap_or(1),
+                rotation: at(1, 42).map(|(_, t)| t.f64()).filter(|v| v.is_finite()).unwrap_or(0.0),
+                style,
+                contents,
+                line_spacing: at(1, 45).map(|(_, t)| t.f64()).filter(|v| v.is_finite() && *v > 0.0).unwrap_or(1.0),
+            }
+        })
+    } else {
+        None
+    };
+    MLeader {
+        leaders: arms,
+        landing,
+        dogleg,
+        text,
+        style: at(0, 3).map(|(_, t)| t.str()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Standard".into()),
+        arrow_size: first_pos(&walk, 1, &[140], 0.18),
+    }
+}
 /// An ACAD_TABLE entity: sizes, cell texts and merges (DXF Reference), plus CADCraft's
 /// title/header flags, text height and style name from xdata when present.
 fn acad_table(tags: &[Tag]) -> Table {
@@ -561,7 +733,7 @@ fn parse_entities(recs: &[(String, Vec<Tag>)], d: &mut Drawing, rx: &mut Rx) -> 
         let owner = crate::dxf_ext::owner(tags);
         let paper = t.i(67) == Some(1);
         let handle = t.s(5).and_then(|h| Handle::parse_hex(&h));
-        let mut kindent = entity(kind, tags);
+        let mut kindent = entity(kind, tags, &rx.styles);
         i += 1;
         match kind.as_str() {
             "POLYLINE" => {
