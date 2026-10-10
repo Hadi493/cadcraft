@@ -109,6 +109,8 @@ pub struct CadApp {
     pub preview_key: String,
     /// Pending unsaved-changes prompt (close/close-all/quit target).
     pub unsaved_ask: Option<crate::dialogs::UnsavedMode>,
+    /// Last seen window-close flag, for edge detection (see intercept).
+    close_was_requested: bool,
 }
 
 impl CadApp {
@@ -133,6 +135,7 @@ impl CadApp {
             preview_tex: None,
             preview_key: String::new(),
             unsaved_ask: None,
+            close_was_requested: false,
         }
     }
 
@@ -230,16 +233,23 @@ impl CadApp {
 
     /// The OS window [X] with unsaved work: cancel the close and ask instead.
     /// (Desktop only; nothing to save to on the web.)
+    ///
+    /// `close_requested` can stay set while the window lives, so this acts on
+    /// its rising edge only: otherwise every Cancel would instantly reopen
+    /// the prompt, and the CancelClose would fight an in-flight quit.
     #[cfg(not(target_arch = "wasm32"))]
     fn intercept_window_close(&mut self, ctx: &egui::Context) {
-        if !ctx.input(|i| i.viewport().close_requested()) {
+        let requested = ctx.input(|i| i.viewport().close_requested());
+        let was = self.close_was_requested;
+        self.close_was_requested = requested;
+        if self.quit_requested {
             return;
         }
-        if !self.session.docs.iter().any(|d| d.is_dirty()) {
+        if !requested || !self.session.docs.iter().any(|d| d.is_dirty()) {
             return;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        if self.ui.dialog.as_deref() != Some("unsaved") {
+        if !was {
             crate::dialogs::ask_unsaved(self, crate::dialogs::UnsavedMode::Quit);
         }
     }
