@@ -488,4 +488,110 @@ mod tests {
         assert!(crate::dialogs::save_all_dirty(&mut app).is_err());
         app.session.cancel();
     }
+
+    /// Drive one egui frame headlessly (real input semantics, no display).
+    fn dialog_frame(ctx: &egui::Context, app: &mut CadApp, events: Vec<egui::Event>, t: &mut f64) {
+        *t += 1.0 / 60.0;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0))),
+            time: Some(*t),
+            events,
+            ..Default::default()
+        };
+        ctx.begin_pass(raw);
+        crate::dialogs::show(app, ctx);
+        ctx.end_pass().textures_delta.clear();
+    }
+
+    fn click_at(ctx: &egui::Context, app: &mut CadApp, x: f32, y: f32, t: &mut f64) {
+        use egui::Event;
+        let pos = egui::pos2(x, y);
+        dialog_frame(ctx, app, vec![Event::PointerMoved(pos)], t);
+        dialog_frame(
+            ctx,
+            app,
+            vec![Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::default() }],
+            t,
+        );
+        dialog_frame(
+            ctx,
+            app,
+            vec![Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::default() }],
+            t,
+        );
+    }
+
+    fn ask_close(app: &mut CadApp) {
+        app.unsaved_ask = Some(crate::dialogs::UnsavedMode::Close(app.session.active));
+        app.ui.dialog = Some("unsaved".into());
+    }
+
+    /// Click every point of a grid over the dialog area until `done` holds.
+    /// Re-arms the dialog when a click dismisses it without finishing the job
+    /// (e.g. hitting Save with no picker, or the window X).
+    fn grid_click_until(
+        ctx: &egui::Context,
+        app: &mut CadApp,
+        t: &mut f64,
+        x_range: (f32, f32),
+        y_range: (f32, f32),
+        done: impl Fn(&CadApp) -> bool,
+    ) -> Option<(f32, f32)> {
+        let mut y = y_range.0;
+        while y <= y_range.1 {
+            let mut x = x_range.0;
+            while x <= x_range.1 {
+                click_at(ctx, app, x, y, t);
+                if done(app) {
+                    return Some((x, y));
+                }
+                if app.ui.dialog.is_none() {
+                    ask_close(app);
+                }
+                x += 15.0;
+            }
+            y += 12.0;
+        }
+        done(app).then_some((-1.0, -1.0))
+    }
+
+    #[test]
+    fn unsaved_cancel_dismisses_without_closing() {
+        let ctx = egui::Context::default();
+        let mut t = 0.0;
+        let mut app = dirty_app(None);
+        ask_close(&mut app);
+        dialog_frame(&ctx, &mut app, vec![], &mut t);
+        assert_eq!(app.ui.dialog.as_deref(), Some("unsaved"));
+        // Right-hand side only: Cancel lives there, Save (left) is excluded so
+        // only Cancel itself can satisfy this. Fine steps: the headless
+        // layout compresses widgets, so the button is smaller than on screen.
+        let mut hit = None;
+        let mut y = 480.0;
+        while hit.is_none() && y <= 620.0 {
+            let mut x = 848.0;
+            while hit.is_none() && x <= 952.0 {
+                click_at(&ctx, &mut app, x, y, &mut t);
+                if app.ui.dialog.is_none() {
+                    hit = Some((x, y));
+                }
+                x += 4.0;
+            }
+            y += 4.0;
+        }
+        assert!(hit.is_some(), "no click dismissed the dialog");
+        assert_eq!(app.session.docs.len(), 1, "nothing may close on the way out");
+        assert!(app.session.state().unwrap().is_dirty(), "drawing stays dirty");
+    }
+
+    #[test]
+    fn unsaved_dont_save_closes() {
+        let ctx = egui::Context::default();
+        let mut t = 0.0;
+        let mut app = dirty_app(None);
+        ask_close(&mut app);
+        let hit = grid_click_until(&ctx, &mut app, &mut t, (560.0, 1050.0), (480.0, 620.0), |a| a.session.docs.is_empty());
+        assert!(hit.is_some(), "no click closed the drawing");
+        assert!(app.ui.dialog.is_none());
+    }
 }
