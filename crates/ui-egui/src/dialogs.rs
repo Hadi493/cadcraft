@@ -233,19 +233,27 @@ fn unsaved_dialog(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
     egui::Window::new("Unsaved Changes").open(open).default_pos(center).pivot(egui::Align2::CENTER_CENTER).default_size(vec2(460.0, 200.0)).show(
         ctx,
         |ui| {
+            // Keyboard escape hatch (mirrors Cancel).
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                done = true;
+            }
             ui.label("Save changes before closing?");
             ui.label(dirty.join(", "));
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
                     match save_all_dirty(app) {
-                        Ok(true) => finish_unsaved(app),
-                        Ok(false) => {}
+                        Ok(true) => {
+                            app.session.echo("Saved.".to_string());
+                            finish_unsaved(app);
+                        }
+                        Ok(false) => app.session.echo("Save cancelled; nothing was closed.".to_string()),
                         Err(e) => app.session.echo(e),
                     }
                     done = true;
                 }
                 if ui.button("Don't Save").clicked() {
+                    let n = app.session.docs.iter().filter(|d| d.is_dirty()).count();
                     match app.unsaved_ask.clone() {
                         Some(UnsavedMode::Close(i)) => {
                             if let Err(e) = app.session.execute("close", &json!({ "index": i, "force": true })) {
@@ -259,6 +267,7 @@ fn unsaved_dialog(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
                         }
                         Some(UnsavedMode::Quit) | None => app.quit_requested = true,
                     }
+                    app.session.echo(format!("Closed {n} drawing(s) without saving."));
                     done = true;
                 }
                 if ui.button("Cancel").clicked() {
