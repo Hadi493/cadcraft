@@ -137,7 +137,11 @@ pub fn run_ui_command(app: &mut CadApp, id: &str, params: &Value) -> Option<Resu
             Ok(Value::Null)
         }
         "ui.quit" => {
-            app.quit_requested = true;
+            if app.session.docs.iter().any(|d| d.is_dirty()) {
+                crate::dialogs::ask_unsaved(app, crate::dialogs::UnsavedMode::Quit);
+            } else {
+                app.quit_requested = true;
+            }
             Ok(Value::Null)
         }
         "ui.noop" => Ok(Value::Null),
@@ -148,6 +152,14 @@ pub fn run_ui_command(app: &mut CadApp, id: &str, params: &Value) -> Option<Resu
         // Typed or menu-invoked (no parameters) these open their dialogs; JSON calls run the command.
         "preview" if params.is_null() => {
             app.ui.dialog = Some("preview".into());
+            Ok(Value::Null)
+        }
+        "close" if params.is_null() && app.session.docs.get(app.session.active).is_some_and(|d| d.is_dirty()) => {
+            crate::dialogs::ask_unsaved(app, crate::dialogs::UnsavedMode::Close(app.session.active));
+            Ok(Value::Null)
+        }
+        "closeall" if params.is_null() && app.session.docs.iter().any(|d| d.is_dirty()) => {
+            crate::dialogs::ask_unsaved(app, crate::dialogs::UnsavedMode::CloseAll);
             Ok(Value::Null)
         }
         "qselect" | "qs" if params.is_null() => {

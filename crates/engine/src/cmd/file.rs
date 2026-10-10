@@ -44,8 +44,16 @@ pub fn specs() -> Vec<CommandSpec> {
             .params("{path} | {data: base64, name}")
             .enabled(always)
             .noundo(),
-        CommandSpec::new("close", "Close", run_close).menu(&["File", "Close"]).key("Cmd+W").params("{index?}").noundo(),
-        CommandSpec::new("closeall", "Close All", run_closeall).menu(&["File", "Close All"]).enabled(always).noundo(),
+        CommandSpec::new("close", "Close", run_close)
+            .menu(&["File", "Close"])
+            .key("Cmd+W")
+            .params("{index?, force?: discard unsaved changes}")
+            .noundo(),
+        CommandSpec::new("closeall", "Close All", run_closeall)
+            .menu(&["File", "Close All"])
+            .params("{force?: discard unsaved changes}")
+            .enabled(always)
+            .noundo(),
         CommandSpec::new("qsave", "Save", run_save).menu(&["File", "Save"]).key("Cmd+S").alias(&["save"]).params("{path?}").noundo(),
         CommandSpec::new("saveas", "Save As...", run_saveas)
             .menu(&["File", "Save As..."])
@@ -113,6 +121,11 @@ fn run_close(s: &mut Session, p: &Value) -> Result<Value> {
     if i >= s.docs.len() {
         return Err(bad("close", "no such drawing"));
     }
+    // Programmatic calls never open dialogs: refuse instead of discarding work.
+    if !bool_or(p, "force", false) && s.docs.get(i).is_some_and(|d| d.is_dirty()) {
+        let title = s.docs.get(i).map(|d| d.title.clone()).unwrap_or_default();
+        return Err(bad("close", format!("`{title}` has unsaved changes; save it, or close with force:true")));
+    }
     s.cancel();
     s.docs.remove(i);
     if s.active >= s.docs.len() {
@@ -121,7 +134,13 @@ fn run_close(s: &mut Session, p: &Value) -> Result<Value> {
     ok()
 }
 
-fn run_closeall(s: &mut Session, _p: &Value) -> Result<Value> {
+fn run_closeall(s: &mut Session, p: &Value) -> Result<Value> {
+    if !bool_or(p, "force", false) {
+        let dirty: Vec<String> = s.docs.iter().filter(|d| d.is_dirty()).map(|d| d.title.clone()).collect();
+        if !dirty.is_empty() {
+            return Err(bad("closeall", format!("unsaved changes in {}; save them, or close with force:true", dirty.join(", "))));
+        }
+    }
     s.cancel();
     s.docs.clear();
     s.active = 0;
@@ -896,6 +915,37 @@ mod tests {
         }
         // The session still works afterwards.
         assert!(s.execute("audit", &json!({})).is_ok());
+    }
+
+    #[test]
+    fn close_refuses_dirty_drawings_without_force() {
+        let mut s = test_session();
+        // Clean drawings close freely.
+        s.execute("close", &json!({})).unwrap();
+        assert!(s.docs.is_empty());
+        s.execute("new", &json!({})).unwrap();
+        s.execute("closeall", &json!({})).unwrap();
+        assert!(s.docs.is_empty());
+        // Dirty drawings are refused, never silently discarded.
+        s.execute("new", &json!({})).unwrap();
+        s.execute("line", &json!({"points": [[0, 0], [1, 1]]})).unwrap();
+        let err = s.execute("close", &json!({})).unwrap_err().to_string();
+        assert!(err.contains("unsaved changes"), "{err}");
+        assert_eq!(s.docs.len(), 1);
+        s.execute("close", &json!({"force": true})).unwrap();
+        assert!(s.docs.is_empty());
+        // closeall names every dirty drawing.
+        s.execute("new", &json!({})).unwrap();
+        s.execute("line", &json!({"points": [[0, 0], [1, 1]]})).unwrap();
+        s.execute("new", &json!({})).unwrap();
+        let err = s.execute("closeall", &json!({})).unwrap_err().to_string();
+        assert!(err.contains("unsaved changes"), "{err}");
+        assert_eq!(s.docs.len(), 2);
+        s.execute("closeall", &json!({"force": true})).unwrap();
+        assert!(s.docs.is_empty());
+        // Hostile index values are clean errors.
+        assert!(s.execute("close", &json!({"index": 99})).is_err());
+        assert!(s.execute("close", &json!({"index": "two"})).is_err());
     }
 
     #[test]

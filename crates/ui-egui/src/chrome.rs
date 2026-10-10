@@ -166,7 +166,11 @@ pub fn file_tabs(app: &mut CadApp, ui: &mut egui::Ui) {
             app.ui.start_tab = false;
         }
         if let Some(i) = close {
-            let _ = app.run("close", json!({ "index": i }));
+            if app.session.docs.get(i).is_some_and(|d| d.is_dirty()) {
+                crate::dialogs::ask_unsaved(app, crate::dialogs::UnsavedMode::Close(i));
+            } else {
+                let _ = app.run("close", json!({ "index": i }));
+            }
         }
     });
 }

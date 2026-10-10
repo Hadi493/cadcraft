@@ -20,6 +20,7 @@ pub fn show(app: &mut CadApp, ctx: &egui::Context) {
         "dsettings" => dsettings(app, ctx, &mut open),
         "preview" => print_preview(app, ctx, &mut open),
         "recovery" => recovery_dialog(app, ctx, &mut open),
+        "unsaved" => unsaved_dialog(app, ctx, &mut open),
         "about" => about(ctx, &mut open),
         "commands" => commands(app, ctx, &mut open),
         "blocks" => blocks(app, ctx, &mut open),
@@ -154,6 +155,138 @@ fn commands(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
     if let Some(c) = start {
         app.ui.dialog = None;
         app.start(c);
+    }
+}
+
+/// What an unsaved-changes prompt applies to.
+#[derive(Clone, Debug)]
+pub enum UnsavedMode {
+    /// Close one drawing (file-tab index).
+    Close(usize),
+    /// Close every drawing.
+    CloseAll,
+    /// Quit the application.
+    Quit,
+}
+
+/// Arm the unsaved-changes dialog for `mode` (callers check dirtiness first).
+pub fn ask_unsaved(app: &mut CadApp, mode: UnsavedMode) {
+    app.unsaved_ask = Some(mode);
+    app.ui.dialog = Some("unsaved".into());
+}
+
+/// Save every dirty drawing, asking for a file name where needed (file
+/// picker). Returns false when the user cancels, before anything is closed.
+/// The active drawing is restored afterwards.
+pub(crate) fn save_all_dirty(app: &mut CadApp) -> Result<bool, String> {
+    if app.session.running.is_some() {
+        return Err("finish the running command before saving".into());
+    }
+    let back = app.session.active;
+    let restore = |app: &mut CadApp| {
+        if back < app.session.docs.len() {
+            app.session.active = back;
+        }
+    };
+    let targets: Vec<(usize, String, Option<String>)> =
+        app.session.docs.iter().enumerate().filter(|(_, d)| d.is_dirty()).map(|(i, d)| (i, d.title.clone(), d.path.clone())).collect();
+    for (i, title, path) in targets {
+        app.session.active = i;
+        match path {
+            Some(_) => {
+                if let Err(e) = app.session.execute("qsave", &Value::Null) {
+                    let msg = e.to_string();
+                    restore(app);
+                    return Err(msg);
+                }
+            }
+            None => match app.services.pick_save.as_ref().and_then(|f| f(&format!("{title}.dxf"))) {
+                Some(p) => {
+                    if let Err(e) = app.session.execute("saveas", &json!({ "path": p })) {
+                        let msg = e.to_string();
+                        restore(app);
+                        return Err(msg);
+                    }
+                }
+                None => {
+                    restore(app);
+                    return Ok(false);
+                }
+            },
+        }
+    }
+    restore(app);
+    Ok(true)
+}
+
+/// Unsaved-changes prompt: Save / Don't Save / Cancel for a close or quit.
+fn unsaved_dialog(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
+    let dirty: Vec<String> = app.session.docs.iter().filter(|d| d.is_dirty()).map(|d| d.title.clone()).collect();
+    if dirty.is_empty() {
+        // Nothing left to ask about (saved elsewhere meanwhile).
+        app.unsaved_ask = None;
+        *open = false;
+        return;
+    }
+    let mut done = false;
+    let center = ctx.viewport_rect().center();
+    egui::Window::new("Unsaved Changes").open(open).default_pos(center).pivot(egui::Align2::CENTER_CENTER).default_size(vec2(460.0, 200.0)).show(
+        ctx,
+        |ui| {
+            ui.label("Save changes before closing?");
+            ui.label(dirty.join(", "));
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    match save_all_dirty(app) {
+                        Ok(true) => finish_unsaved(app),
+                        Ok(false) => {}
+                        Err(e) => app.session.echo(e),
+                    }
+                    done = true;
+                }
+                if ui.button("Don't Save").clicked() {
+                    match app.unsaved_ask.clone() {
+                        Some(UnsavedMode::Close(i)) => {
+                            if let Err(e) = app.session.execute("close", &json!({ "index": i, "force": true })) {
+                                app.session.echo(e.to_string());
+                            }
+                        }
+                        Some(UnsavedMode::CloseAll) => {
+                            if let Err(e) = app.session.execute("closeall", &json!({ "force": true })) {
+                                app.session.echo(e.to_string());
+                            }
+                        }
+                        Some(UnsavedMode::Quit) | None => app.quit_requested = true,
+                    }
+                    done = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    done = true;
+                }
+            });
+        },
+    );
+    if done || !*open {
+        app.unsaved_ask = None;
+        app.ui.dialog = None;
+    }
+
+    /// Run the pending close/quit now that saving is done.
+    fn finish_unsaved(app: &mut CadApp) {
+        match app.unsaved_ask.clone() {
+            Some(UnsavedMode::Close(i)) => {
+                if let Err(e) = app.session.execute("close", &json!({ "index": i, "force": true })) {
+                    app.session.echo(e.to_string());
+                }
+            }
+            Some(UnsavedMode::CloseAll) => {
+                if let Err(e) = app.session.execute("closeall", &json!({ "force": true })) {
+                    app.session.echo(e.to_string());
+                }
+            }
+            Some(UnsavedMode::Quit) | None => app.quit_requested = true,
+        }
     }
 }
 

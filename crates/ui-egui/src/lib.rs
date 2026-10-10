@@ -107,6 +107,8 @@ pub struct CadApp {
     /// Print-preview image and the `layout@revision` key it was rendered for.
     pub preview_tex: Option<egui::TextureHandle>,
     pub preview_key: String,
+    /// Pending unsaved-changes prompt (close/close-all/quit target).
+    pub unsaved_ask: Option<crate::dialogs::UnsavedMode>,
 }
 
 impl CadApp {
@@ -130,6 +132,7 @@ impl CadApp {
             autosave_accum_s: 0.0,
             preview_tex: None,
             preview_key: String::new(),
+            unsaved_ask: None,
         }
     }
 
@@ -225,6 +228,22 @@ impl CadApp {
         }
     }
 
+    /// The OS window [X] with unsaved work: cancel the close and ask instead.
+    /// (Desktop only; nothing to save to on the web.)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn intercept_window_close(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        if !self.session.docs.iter().any(|d| d.is_dirty()) {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if self.ui.dialog.as_deref() != Some("unsaved") {
+            crate::dialogs::ask_unsaved(self, crate::dialogs::UnsavedMode::Quit);
+        }
+    }
+
     /// Per-frame logic before layout.
     pub fn logic(&mut self, ctx: &egui::Context) {
         if !self.styled {
@@ -241,6 +260,8 @@ impl CadApp {
         menus::shortcuts(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.autosave_tick_frame(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.intercept_window_close(ctx);
         #[cfg(not(target_arch = "wasm32"))]
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             let p = f.path().to_string_lossy().to_string();
@@ -395,6 +416,8 @@ fn autosave_tick(accum_s: f64, dt_s: f64, savetime_min: f64) -> (f64, Option<f64
 #[cfg(test)]
 mod tests {
     use super::autosave_tick;
+    use super::{CadApp, Services, Session};
+    use serde_json::json;
 
     #[test]
     fn savetime_timer() {
@@ -403,5 +426,66 @@ mod tests {
         assert_eq!(autosave_tick(0.0, 60.0, 10.0), (60.0, None));
         assert_eq!(autosave_tick(599.0, 2.0, 10.0), (0.0, Some(601.0 / 60.0)), "fires and resets");
         assert_eq!(autosave_tick(0.0, -5.0, 10.0), (0.0, None), "negative frames clamp");
+    }
+
+    fn fake_io() {
+        cadcraft_engine::cmd::file::set_io(cadcraft_engine::cmd::file::IoHooks {
+            read: |_, _| Err("no reader in tests".into()),
+            write: |_, name| Ok(format!("fake {name}").into_bytes()),
+            plot: None,
+        });
+    }
+
+    fn writer_ok(s: &mut Session) -> bool {
+        s.execute("document.bytes", &json!({})).is_ok()
+    }
+
+    fn dirty_app(pick: Option<Box<dyn Fn(&str) -> Option<String>>>) -> CadApp {
+        let mut app = CadApp::new(Session::new(), Services { pick_open: None, pick_save: pick });
+        app.session.execute("line", &json!({"points": [[0, 0], [1, 1]]})).unwrap();
+        assert!(app.session.state().unwrap().is_dirty());
+        app
+    }
+
+    #[test]
+    fn save_all_cancel_keeps_drawings() {
+        fake_io();
+        let mut app = dirty_app(None);
+        if !writer_ok(&mut app.session) {
+            return; // another test installed hooks without a writer first
+        }
+        // No picker: cancelling saves nothing and closes nothing.
+        assert_eq!(crate::dialogs::save_all_dirty(&mut app), Ok(false));
+        assert!(app.session.state().unwrap().is_dirty());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_all_picks_names_for_untitled() {
+        fake_io();
+        let dir = std::env::temp_dir().join(format!("cadcraft-saveall-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let picked = dir.join("picked.dxf").to_string_lossy().to_string();
+        let mut app = dirty_app(Some(Box::new(move |_| Some(picked.clone()))));
+        if !writer_ok(&mut app.session) {
+            return;
+        }
+        assert_eq!(crate::dialogs::save_all_dirty(&mut app), Ok(true));
+        assert!(!app.session.state().unwrap().is_dirty());
+        assert!(dir.join("picked.dxf").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_all_refuses_while_command_runs() {
+        fake_io();
+        let mut app = dirty_app(None);
+        if !writer_ok(&mut app.session) {
+            return;
+        }
+        app.session.start("line").unwrap();
+        assert!(app.session.running.is_some());
+        assert!(crate::dialogs::save_all_dirty(&mut app).is_err());
+        app.session.cancel();
     }
 }
