@@ -26,6 +26,7 @@ pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("ui.resetpalettes", "Reset Palettes", &["Window", "Reset Palettes"], None),
     ("ui.start", "Start", &["Window", "Start"], None),
     ("ui.dialog.layers", "Layer Properties Manager", &["Window", "Layers"], None),
+    ("ui.dialog.recovery", "Drawing Recovery", &["File", "Drawing Recovery"], None),
     ("ui.dialog.blocks", "Blocks", &["Window", "Blocks"], None),
     ("ui.dialog.qselect", "Quick Select...", &[], None),
     ("ui.dialog.parameters", "Parameters Manager", &["Window", "Parameters Manager"], None),
@@ -126,6 +127,7 @@ pub fn run_ui_command(app: &mut CadApp, id: &str, params: &Value) -> Option<Resu
         | "ui.dialog.about"
         | "ui.dialog.commands"
         | "ui.dialog.qselect"
+        | "ui.dialog.recovery"
         | "ui.dialog.parameters" => {
             app.ui.dialog = Some(id.trim_start_matches("ui.dialog.").to_string());
             Ok(Value::Null)

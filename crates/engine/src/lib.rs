@@ -91,6 +91,8 @@ pub struct DocState {
     pub revision: u64,
     /// Revision at the last save or autosave (recovery data is current when equal).
     pub autosave_rev: u64,
+    /// Where the last autosave wrote (removed on the next real save).
+    pub autosave_path: Option<String>,
     pub space: Space,
     /// MSPACE: the layout viewport whose model space is being edited (None = paper space).
     pub mspace: Option<Handle>,
@@ -115,6 +117,7 @@ impl DocState {
             title: title.into(),
             revision: 1,
             autosave_rev: 1,
+            autosave_path: None,
             space: Space::Model,
             mspace: None,
             views: Vec::new(),

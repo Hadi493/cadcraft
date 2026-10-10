@@ -37,7 +37,7 @@ A person can do real 2D drafting work in CADCraft and trust it with their files:
 | Autosave, crash recovery, RECOVER/AUDIT | done: SAVETIME/ISAVEBAK/SAVEFILE sysvars, `autosave` command, desktop SAVETIME timer with wake-ups, AUDIT (repairs layers, linetypes, non-finite geometry), RECOVER, `.bak` on save | — |
 | Options dialog and preferences | partial | 6 |
 | Plot preview | done: `preview` command + Print Preview dialog (layout picker, auto-refresh on edit) verified live in the app; autosave timer proven end-to-end (`.sv$` written on SAVETIME) | — |
-| Scripted smoke test of all 298 commands (engine sweep done: JSON + interactive starts, 2 prompt guards added; UI-driven sweep pending), then fixing what it finds | started | 8 |
+| Scripted smoke test of all 300 commands (engine sweep done: JSON + interactive starts, 2 prompt guards added; UI-driven sweep pending), then fixing what it finds | started | 8 |
 | Release pipeline: first green signed build on every platform | workflows written; first run being started | 6 |
 | Getting-started docs and the web build hosted | partial | 4 |
 | **Total** | | **≈ 33** |
@@ -47,7 +47,7 @@ A person can do real 2D drafting work in CADCraft and trust it with their files:
 | Measure | Value |
 |---|---|
 | Menu breadth (`cargo xtask parity`, [docs/parity.md](docs/parity.md)) | **233 / 491 reference menu items (47%)** |
-| Registered commands | 298 (133 with interactive prompts) |
+| Registered commands | 300 (133 with interactive prompts) |
 | **Estimated overall feature parity (weighted by how much each area matters)** | **≈ 29%** |
 | Performance | 200k entities: pick 0.001 ms, pick after an edit ≈ 4 ms (incremental R-tree), GPU canvas ≈ 4 ms per frame |
 | Tests | geometry, colour, document, fonts, render, DXF/DWG round trips, constraints solver, engine (commands, prompts, snaps, selection, undo, scripts, hostile input), MCP agent tasks, xtask |

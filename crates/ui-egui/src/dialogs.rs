@@ -19,6 +19,7 @@ pub fn show(app: &mut CadApp, ctx: &egui::Context) {
         "parameters" => crate::parametric::parameters_dialog(app, ctx, &mut open),
         "dsettings" => dsettings(app, ctx, &mut open),
         "preview" => print_preview(app, ctx, &mut open),
+        "recovery" => recovery_dialog(app, ctx, &mut open),
         "about" => about(ctx, &mut open),
         "commands" => commands(app, ctx, &mut open),
         "blocks" => blocks(app, ctx, &mut open),
@@ -156,6 +157,107 @@ fn commands(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
     }
 }
 
+/// After launch, offer any recovery files left behind by a crash (desktop only).
+/// Called once at startup; a no-op when there is nothing to recover.
+pub fn startup_recovery(app: &mut CadApp) {
+    if query_recovery(app).is_empty() {
+        return;
+    }
+    app.session.echo("Found recoverable file(s) from a previous session (Drawing Recovery dialog).".to_string());
+    app.ui.dialog = Some("recovery".into());
+}
+
+fn query_recovery(app: &mut CadApp) -> Vec<(String, String, u64)> {
+    match app.session.execute("recovery.list", &Value::Null) {
+        Ok(v) => v
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|f| Some((f.get("name")?.as_str()?.to_string(), f.get("path")?.as_str()?.to_string(), f.get("bytes")?.as_u64()?)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Drawing recovery: open or discard automatic-save files from crashed sessions.
+/// The list loads on first show and after every action.
+fn recovery_dialog(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
+    let list_id = egui::Id::new("recovery_files");
+    let loaded_id = egui::Id::new("recovery_loaded");
+    let files: Vec<(String, String, u64)> = ctx.data_mut(|d| {
+        if d.get_temp::<bool>(loaded_id).unwrap_or(false) {
+            d.get_temp(list_id).unwrap_or_default()
+        } else {
+            d.insert_temp(loaded_id, true);
+            let fresh = query_recovery(app);
+            d.insert_temp(list_id, fresh.clone());
+            fresh
+        }
+    });
+    let mut invalidate = false;
+    let mut close = false;
+    let mut action: Option<(bool, String)> = None; // (open?, path)
+    let center = ctx.viewport_rect().center();
+    egui::Window::new("Drawing Recovery").open(open).default_pos(center).pivot(egui::Align2::CENTER_CENTER).default_size(vec2(520.0, 300.0)).show(
+        ctx,
+        |ui| {
+            ui.label("These automatic-save files were left by a previous session:");
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if files.is_empty() {
+                    ui.label("Nothing to recover.");
+                }
+                for (name, path, bytes) in &files {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{name} ({bytes} bytes)")).on_hover_text(path);
+                        if ui.button("Open").clicked() {
+                            action = Some((true, path.clone()));
+                        }
+                        if ui.button("Delete").clicked() {
+                            action = Some((false, path.clone()));
+                        }
+                    });
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Refresh").clicked() {
+                    invalidate = true;
+                }
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        },
+    );
+    if let Some((open_it, path)) = action {
+        if open_it {
+            match app.session.execute("recover", &json!({ "path": path })) {
+                Ok(v) => {
+                    let msg = v.get("message").and_then(Value::as_str).unwrap_or("");
+                    app.session.echo(format!("Recovered {path} ({msg})"));
+                    app.canvas.zoom_pending = true;
+                }
+                Err(e) => app.session.echo(format!("Recovery of {path} failed: {e}")),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if !open_it {
+            let _ = std::fs::remove_file(&path);
+        }
+        invalidate = true;
+    }
+    if invalidate {
+        ctx.data_mut(|d| d.remove::<bool>(loaded_id));
+    }
+    if close {
+        *open = false;
+    }
+}
+
 fn blocks(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
     egui::Window::new("Blocks").open(open).default_size(vec2(320.0, 360.0)).show(ctx, |ui| {
         let Ok(d) = app.session.doc() else { return };
@@ -193,49 +295,55 @@ fn print_preview(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
     let rev = app.session.state().map(|s| s.revision).unwrap_or(0);
     let key = format!("{layout}@{rev}");
     let mut refresh = app.preview_key != key || app.preview_tex.is_none();
-    egui::Window::new("Print Preview").open(open).default_size(vec2(720.0, 600.0)).show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Layout");
-            egui::ComboBox::from_id_salt("preview_layout_combo").selected_text(&layout).show_ui(ui, |ui| {
-                for n in &names {
-                    ui.selectable_value(&mut layout, n.clone(), n);
-                }
-            });
-            if ui.button("Refresh").clicked() {
-                refresh = true;
-            }
-        });
-        ui.separator();
-        if refresh {
-            app.preview_tex = None;
-            match app.session.execute("preview", &json!({"layout": layout, "width": 1100})) {
-                Ok(v) => {
-                    let bytes = v.get("data").and_then(Value::as_str).map(cadcraft_engine::cmd::file::base64_decode).unwrap_or_default();
-                    match bytes.and_then(|b| image::load_from_memory(&b).ok()) {
-                        Some(img) => {
-                            let rgba = img.to_rgba8();
-                            let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-                            let px = rgba.into_raw();
-                            let tex = ctx.load_texture("print_preview", egui::ColorImage::from_rgba_unmultiplied([w, h], &px), Default::default());
-                            app.preview_tex = Some(tex);
-                            app.preview_key = key.clone();
-                        }
-                        None => app.session.echo("Print Preview: could not render that layout.".to_string()),
+    // Open in the centre of the screen (still draggable afterwards).
+    let center = ctx.viewport_rect().center();
+    egui::Window::new("Print Preview").open(open).default_pos(center).pivot(egui::Align2::CENTER_CENTER).default_size(vec2(720.0, 600.0)).show(
+        ctx,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Layout");
+                egui::ComboBox::from_id_salt("preview_layout_combo").selected_text(&layout).show_ui(ui, |ui| {
+                    for n in &names {
+                        ui.selectable_value(&mut layout, n.clone(), n);
                     }
+                });
+                if ui.button("Refresh").clicked() {
+                    refresh = true;
                 }
-                Err(e) => app.session.echo(format!("Print Preview: {e}")),
-            }
-        }
-        if let Some(tex) = &app.preview_tex {
-            let size = tex.size_vec2();
-            let scale = (ui.available_width() / size.x).min(1.0);
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.image((tex.id(), size * scale));
             });
-        } else {
-            ui.label("No preview yet.");
-        }
-    });
+            ui.separator();
+            if refresh {
+                app.preview_tex = None;
+                match app.session.execute("preview", &json!({"layout": layout, "width": 1100})) {
+                    Ok(v) => {
+                        let bytes = v.get("data").and_then(Value::as_str).map(cadcraft_engine::cmd::file::base64_decode).unwrap_or_default();
+                        match bytes.and_then(|b| image::load_from_memory(&b).ok()) {
+                            Some(img) => {
+                                let rgba = img.to_rgba8();
+                                let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+                                let px = rgba.into_raw();
+                                let tex =
+                                    ctx.load_texture("print_preview", egui::ColorImage::from_rgba_unmultiplied([w, h], &px), Default::default());
+                                app.preview_tex = Some(tex);
+                                app.preview_key = key.clone();
+                            }
+                            None => app.session.echo("Print Preview: could not render that layout.".to_string()),
+                        }
+                    }
+                    Err(e) => app.session.echo(format!("Print Preview: {e}")),
+                }
+            }
+            if let Some(tex) = &app.preview_tex {
+                let size = tex.size_vec2();
+                let scale = (ui.available_width() / size.x).min(1.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.image((tex.id(), size * scale));
+                });
+            } else {
+                ui.label("No preview yet.");
+            }
+        },
+    );
     ctx.data_mut(|d| d.insert_temp(id, layout));
 }
 

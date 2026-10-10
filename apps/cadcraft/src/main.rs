@@ -137,6 +137,9 @@ fn main() -> eframe::Result {
             if app.session.docs.is_empty() {
                 app.session.new_drawing(false);
             }
+            // Offer any recovery files left by a crash.
+            // Offer any recovery files left by a crash.
+            cadcraft_ui_egui::dialogs::startup_recovery(&mut app);
             Ok(Box::new(App(
                 app,
                 #[cfg(target_os = "macos")]

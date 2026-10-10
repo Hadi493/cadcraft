@@ -212,7 +212,7 @@ impl CadApp {
             let (accum, due) = autosave_tick(self.autosave_accum_s, dt, savetime);
             self.autosave_accum_s = accum;
             if let Some(minutes) = due
-                && let Ok(v) = self.session.execute("autosave", &json!({ "minutes": minutes }))
+                && let Ok(v) = self.session.execute("autosave", &json!({ "minutes": minutes, "all": true }))
                 && v.get("autosaved").and_then(Value::as_bool).unwrap_or(false)
                 && let Some(m) = v.get("message").and_then(Value::as_str)
             {

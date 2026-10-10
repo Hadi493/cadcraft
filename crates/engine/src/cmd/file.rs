@@ -63,7 +63,11 @@ pub fn specs() -> Vec<CommandSpec> {
             .enabled(always)
             .noundo(),
         CommandSpec::new("autosave", "Automatic Save", run_autosave)
-            .params("{force?: bool, minutes?: elapsed minutes, path?} → {needed, autosaved, path?}")
+            .params("{force?: bool, minutes?: elapsed minutes, all?: save every open drawing, path?} → {needed, autosaved, path?|files?}")
+            .enabled(always)
+            .noundo(),
+        CommandSpec::new("recovery.list", "List Recovery Files", run_recovery_list)
+            .params("{dir?: default temp dir} → {dir, files: [{name, path, bytes, modified}]}")
             .enabled(always)
             .noundo(),
     ]
@@ -153,6 +157,20 @@ pub(crate) fn save_to(s: &mut Session, path: &str) -> Result<(usize, bool)> {
     st.title = file_name(path);
     // A real save makes recovery data redundant.
     st.autosave_rev = st.revision;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Best-effort cleanup of this drawing's own recovery file (ours end in .sv$).
+        if let Some(old) = st.autosave_path.take()
+            && old != path
+            && old.to_ascii_lowercase().ends_with(".sv$")
+        {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        st.autosave_path = None;
+    }
     Ok((bytes.len(), backup))
 }
 
@@ -219,28 +237,32 @@ pub(crate) fn autosave_due(savetime: f64, minutes: f64, force: bool) -> bool {
     force || (savetime > 0.0 && minutes >= savetime)
 }
 
-fn default_recovery_path(s: &Session) -> Result<String> {
-    let st = s.state()?;
+fn recovery_path_for(st: &crate::DocState) -> String {
     if let Some(p) = &st.path {
-        return Ok(recovery_name(p));
+        return recovery_name(p);
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let name = recovery_name(&st.title);
-        Ok(std::env::temp_dir().join(name).to_string_lossy().to_string())
+        std::env::temp_dir().join(name).to_string_lossy().to_string()
     }
     #[cfg(target_arch = "wasm32")]
-    return Ok(recovery_name(&st.title));
+    return recovery_name(&st.title);
 }
 
 fn run_autosave(s: &mut Session, p: &Value) -> Result<Value> {
     let savetime = s.settings.savetime;
     let force = bool_or(p, "force", false);
     let minutes = p.get("minutes").and_then(Value::as_f64).filter(|f| f.is_finite()).map(|f| f.max(0.0)).unwrap_or(0.0);
-    let st = s.state()?;
+    let all = bool_or(p, "all", false);
     // Recovery tracks the revision, not the file: a QSAVE also marks recovery current.
-    let current = st.revision != st.autosave_rev;
-    if !current {
+    // `all` walks every open drawing without disturbing the active one or the selection.
+    let targets: Vec<usize> = if all {
+        s.docs.iter().enumerate().filter(|(_, st)| st.revision != st.autosave_rev).map(|(i, _)| i).collect()
+    } else {
+        s.state().map(|st| if st.revision != st.autosave_rev { vec![s.active] } else { Vec::new() }).unwrap_or_default()
+    };
+    if targets.is_empty() {
         return Ok(json!({ "needed": false, "autosaved": false, "message": "No changes since the last save." }));
     }
     if !autosave_due(savetime, minutes, force) {
@@ -251,32 +273,101 @@ fn run_autosave(s: &mut Session, p: &Value) -> Result<Value> {
         };
         return Ok(json!({ "needed": false, "autosaved": false, "savetime": savetime, "message": msg }));
     }
+    if all && str_param(p, "path").is_some() {
+        return Err(bad("autosave", "`path` needs a single drawing; omit it with `all`"));
+    }
     let hooks = io().ok_or_else(|| bad("autosave", "file formats are not available in this build"))?;
-    let bytes = (hooks.write)(s.doc()?, "drawing.dxf").map_err(|e| bad("autosave", e))?;
+    let explicit = str_param(p, "path").map(str::to_string);
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let dest = match str_param(p, "path") {
-            Some(x) => x.to_string(),
-            None => default_recovery_path(s)?,
-        };
-        let tmp = format!("{dest}.cadcraft-tmp");
-        std::fs::write(&tmp, &bytes).map_err(|e| bad("autosave", format!("{dest}: {e}")))?;
-        std::fs::rename(&tmp, &dest).map_err(|e| bad("autosave", format!("{dest}: {e}")))?;
-        let st = s.state_mut()?;
-        st.autosave_rev = st.revision;
-        Ok(
-            json!({ "needed": true, "autosaved": true, "path": dest, "bytes": bytes.len(), "message": format!("Autosaved {} byte(s) to {dest}.", bytes.len()) }),
-        )
+        let mut files = Vec::new();
+        for i in targets {
+            let dest = match &explicit {
+                Some(x) => x.clone(),
+                None => {
+                    let st = s.docs.get(i).ok_or_else(|| bad("autosave", "drawing closed"))?;
+                    recovery_path_for(st)
+                }
+            };
+            let bytes = {
+                let st = s.docs.get(i).ok_or_else(|| bad("autosave", "drawing closed"))?;
+                (hooks.write)(&st.doc, "drawing.dxf").map_err(|e| bad("autosave", e))?
+            };
+            let tmp = format!("{dest}.cadcraft-tmp");
+            std::fs::write(&tmp, &bytes).map_err(|e| bad("autosave", format!("{dest}: {e}")))?;
+            std::fs::rename(&tmp, &dest).map_err(|e| bad("autosave", format!("{dest}: {e}")))?;
+            let st = s.docs.get_mut(i).ok_or_else(|| bad("autosave", "drawing closed"))?;
+            st.autosave_rev = st.revision;
+            st.autosave_path = Some(dest.clone());
+            files.push(json!({ "index": i, "title": st.title, "path": dest, "bytes": bytes.len() }));
+        }
+        if !all {
+            let f = files.into_iter().next().ok_or_else(|| bad("autosave", "nothing saved"))?;
+            return Ok(json!({ "needed": true, "autosaved": true, "path": f["path"], "bytes": f["bytes"],
+                "message": format!("Autosaved {} byte(s) to {}.", f["bytes"], f["path"].as_str().unwrap_or("")) }));
+        }
+        let n = files.len();
+        Ok(json!({ "needed": true, "autosaved": true, "files": files, "message": format!("Autosaved {n} drawing(s).") }))
     }
     #[cfg(target_arch = "wasm32")]
     {
-        if str_param(p, "path").is_some() {
+        if explicit.is_some() {
             return Err(bad("autosave", "paths are not available on the web; omit `path` to receive `data`"));
         }
-        let suggestion = default_recovery_path(s)?;
-        let st = s.state_mut()?;
-        st.autosave_rev = st.revision;
-        return Ok(json!({ "needed": true, "autosaved": true, "suggestion": suggestion, "data": base64_encode(&bytes), "bytes": bytes.len() }));
+        let mut files = Vec::new();
+        for i in targets {
+            let st = s.docs.get(i).ok_or_else(|| bad("autosave", "drawing closed"))?;
+            let bytes = (hooks.write)(&st.doc, "drawing.dxf").map_err(|e| bad("autosave", e))?;
+            files.push(
+                json!({ "index": i, "title": st.title, "suggestion": recovery_path_for(st), "data": base64_encode(&bytes), "bytes": bytes.len() }),
+            );
+            let st = s.docs.get_mut(i).ok_or_else(|| bad("autosave", "drawing closed"))?;
+            st.autosave_rev = st.revision;
+        }
+        if !all {
+            let f = files.into_iter().next().ok_or_else(|| bad("autosave", "nothing saved"))?;
+            return Ok(json!({ "needed": true, "autosaved": true, "suggestion": f["suggestion"], "data": f["data"], "bytes": f["bytes"] }));
+        }
+        let n = files.len();
+        Ok(json!({ "needed": true, "autosaved": true, "files": files, "message": format!("Autosaved {n} drawing(s).") }))
+    }
+}
+
+fn run_recovery_list(s: &mut Session, p: &Value) -> Result<Value> {
+    let _ = s;
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = p;
+        return Ok(json!({ "dir": "", "files": [], "message": "Recovery files are not available on the web." }));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if p.get("dir").is_some_and(|v| !v.is_string()) {
+            return Err(bad("recovery.list", "`dir` must be a path string"));
+        }
+        let dir = str_param(p, "dir").map(str::to_string).unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+        let rd = std::fs::read_dir(&dir).map_err(|e| {
+            if str_param(p, "dir").is_some() { bad("recovery.list", format!("{dir}: {e}")) } else { bad("recovery.list", e.to_string()) }
+        })?;
+        let mut files = Vec::new();
+        for e in rd.take(1001).flatten() {
+            let path = e.path();
+            let is_sv = path.extension().is_some_and(|x| x.eq_ignore_ascii_case("sv$"));
+            if !is_sv {
+                continue;
+            }
+            let md = e.metadata().ok();
+            let bytes = md.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified =
+                md.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            files.push(json!({ "name": path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), "path": path.to_string_lossy(), "bytes": bytes, "modified": modified }));
+            if files.len() >= 1000 {
+                break;
+            }
+        }
+        files.sort_by(|a, b| b["modified"].as_u64().cmp(&a["modified"].as_u64()));
+        let n = files.len();
+        Ok(json!({ "dir": dir, "files": files, "message": format!("{n} recovery file(s) in {dir}.") }))
     }
 }
 
@@ -322,20 +413,19 @@ fn is_standard_linetype(name: &str) -> bool {
     matches!(name.trim().to_ascii_lowercase().as_str(), "bylayer" | "byblock" | "continuous" | "")
 }
 
+#[derive(Clone, Debug)]
+struct Issue {
+    loc: StoreLoc,
+    handle: Handle,
+    type_name: String,
+    bad_layer: Option<String>,
+    bad_linetype: Option<String>,
+    non_finite: bool,
+}
+
 /// Scan model space, layouts and block definitions for corrupt or dangling data.
-/// With `fix`, removes non-finite entities, repairs layer/linetype references and
-/// prunes dangling selection handles. Never fails: it reports what it found.
-pub(crate) fn audit_drawing(d: &mut Drawing, fix: bool) -> AuditReport {
-    let mut report = AuditReport::default();
-    // Pass 1 (read-only): collect every issue first so table repairs can't race iteration.
-    struct Issue {
-        loc: StoreLoc,
-        handle: Handle,
-        type_name: String,
-        bad_layer: Option<String>,
-        bad_linetype: Option<String>,
-        non_finite: bool,
-    }
+/// Read-only: a clean scan never dirties the drawing (no copy-on-write).
+fn collect_issues(d: &Drawing) -> Vec<Issue> {
     let mut issues: Vec<Issue> = Vec::new();
     let mut locs: Vec<StoreLoc> = vec![StoreLoc::Model];
     locs.extend((0..d.layouts.len()).map(StoreLoc::Layout));
@@ -392,63 +482,74 @@ pub(crate) fn audit_drawing(d: &mut Drawing, fix: bool) -> AuditReport {
             }
         }
     }
-    // Pass 2: apply repairs.
+    issues
+}
+
+/// Apply collected repairs. Callers must only take `&mut` when `issues` is
+/// non-empty: borrowing mutably dirties the drawing even with no changes.
+fn apply_fixes(d: &mut Drawing, issues: &[Issue]) -> AuditReport {
+    let mut report = AuditReport::default();
     let mut new_layers: Vec<String> = Vec::new();
-    for is in &issues {
+    for is in issues {
         if is.non_finite {
             let label = is.loc.label(d);
-            if fix {
-                let removed = match &is.loc {
-                    StoreLoc::Model => d.model.remove(is.handle).is_some(),
-                    StoreLoc::Layout(i) => d.layouts.get_mut(*i).and_then(|l| l.entities.remove(is.handle)).is_some(),
-                    StoreLoc::Block(n) => {
-                        d.blocks.get_mut(n).map(|b| std::sync::Arc::make_mut(b).entities.remove(is.handle).is_some()).unwrap_or(false)
-                    }
-                };
-                note(&mut report, removed, format!("{} {} in {}: non-finite geometry removed.", is.type_name, is.handle.hex(), label));
-            } else {
-                note(&mut report, false, format!("{} {} in {}: non-finite geometry.", is.type_name, is.handle.hex(), label));
-            }
+            let removed = match &is.loc {
+                StoreLoc::Model => d.model.remove(is.handle).is_some(),
+                StoreLoc::Layout(i) => d.layouts.get_mut(*i).and_then(|l| l.entities.remove(is.handle)).is_some(),
+                StoreLoc::Block(n) => d.blocks.get_mut(n).map(|b| std::sync::Arc::make_mut(b).entities.remove(is.handle).is_some()).unwrap_or(false),
+            };
+            note(&mut report, removed, format!("{} {} in {}: non-finite geometry removed.", is.type_name, is.handle.hex(), label));
             continue;
         }
         if let Some(layer) = &is.bad_layer {
             let label = is.loc.label(d);
-            if fix {
-                if !new_layers.iter().any(|l| l.eq_ignore_ascii_case(layer)) {
-                    new_layers.push(layer.clone());
-                }
-                let ok = match &is.loc {
-                    StoreLoc::Model | StoreLoc::Layout(_) => d.modify_entity(is.handle, |e| e.common.layer = layer.clone()).is_ok(),
-                    StoreLoc::Block(n) => d
-                        .blocks
-                        .get_mut(n)
-                        .map(|b| std::sync::Arc::make_mut(b).entities.modify(is.handle, |e| e.common.layer = layer.clone()))
-                        .unwrap_or(false),
-                };
-                note(&mut report, ok, format!("{} {} in {}: layer `{layer}` repaired.", is.type_name, is.handle.hex(), label));
-            } else {
-                note(&mut report, false, format!("{} {} in {}: missing layer `{layer}`.", is.type_name, is.handle.hex(), label));
+            if !new_layers.iter().any(|l| l.eq_ignore_ascii_case(layer)) {
+                new_layers.push(layer.clone());
             }
+            let ok = match &is.loc {
+                StoreLoc::Model | StoreLoc::Layout(_) => d.modify_entity(is.handle, |e| e.common.layer = layer.clone()).is_ok(),
+                StoreLoc::Block(n) => d
+                    .blocks
+                    .get_mut(n)
+                    .map(|b| std::sync::Arc::make_mut(b).entities.modify(is.handle, |e| e.common.layer = layer.clone()))
+                    .unwrap_or(false),
+            };
+            note(&mut report, ok, format!("{} {} in {}: layer `{layer}` repaired.", is.type_name, is.handle.hex(), label));
         }
         if let Some(lt) = &is.bad_linetype {
             let label = is.loc.label(d);
-            if fix {
-                let ok = match &is.loc {
-                    StoreLoc::Model | StoreLoc::Layout(_) => d.modify_entity(is.handle, |e| e.common.linetype = "ByLayer".into()).is_ok(),
-                    StoreLoc::Block(n) => d
-                        .blocks
-                        .get_mut(n)
-                        .map(|b| std::sync::Arc::make_mut(b).entities.modify(is.handle, |e| e.common.linetype = "ByLayer".into()))
-                        .unwrap_or(false),
-                };
-                note(&mut report, ok, format!("{} {} in {}: linetype `{lt}` reset to ByLayer.", is.type_name, is.handle.hex(), label));
-            } else {
-                note(&mut report, false, format!("{} {} in {}: missing linetype `{lt}`.", is.type_name, is.handle.hex(), label));
-            }
+            let ok = match &is.loc {
+                StoreLoc::Model | StoreLoc::Layout(_) => d.modify_entity(is.handle, |e| e.common.linetype = "ByLayer".into()).is_ok(),
+                StoreLoc::Block(n) => d
+                    .blocks
+                    .get_mut(n)
+                    .map(|b| std::sync::Arc::make_mut(b).entities.modify(is.handle, |e| e.common.linetype = "ByLayer".into()))
+                    .unwrap_or(false),
+            };
+            note(&mut report, ok, format!("{} {} in {}: linetype `{lt}` reset to ByLayer.", is.type_name, is.handle.hex(), label));
         }
     }
     for layer in new_layers {
         d.ensure_layer(&layer);
+    }
+    report
+}
+
+/// Report collected issues without touching the drawing.
+fn report_issues(d: &Drawing, issues: &[Issue]) -> AuditReport {
+    let mut report = AuditReport::default();
+    for is in issues {
+        let label = is.loc.label(d);
+        if is.non_finite {
+            note(&mut report, false, format!("{} {} in {}: non-finite geometry.", is.type_name, is.handle.hex(), label));
+            continue;
+        }
+        if let Some(layer) = &is.bad_layer {
+            note(&mut report, false, format!("{} {} in {}: missing layer `{layer}`.", is.type_name, is.handle.hex(), label));
+        }
+        if let Some(lt) = &is.bad_linetype {
+            note(&mut report, false, format!("{} {} in {}: missing linetype `{lt}`.", is.type_name, is.handle.hex(), label));
+        }
     }
     report
 }
@@ -460,7 +561,10 @@ fn audit_report_value(report: &AuditReport) -> Value {
 
 fn run_audit(s: &mut Session, p: &Value) -> Result<Value> {
     let fix = bool_or(p, "fix", true);
-    let report = audit_drawing(s.doc_mut()?, fix);
+    // Scan read-only first: a clean audit must not dirty the drawing, and an
+    // empty issue list needs no mutable borrow at all.
+    let issues = collect_issues(s.doc()?);
+    let report = if fix && !issues.is_empty() { apply_fixes(s.doc_mut()?, &issues) } else { report_issues(s.doc()?, &issues) };
     if fix {
         // Drop selection handles whose entities were removed by the repair.
         let stale: Vec<Handle> = {
@@ -477,11 +581,11 @@ fn run_audit(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn run_recover(s: &mut Session, p: &Value) -> Result<Value> {
     let fix = bool_or(p, "fix", true);
-    let (bytes, name) = if let Some(path) = str_param(p, "path") {
+    let (bytes, name, source) = if let Some(path) = str_param(p, "path") {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let b = std::fs::read(path).map_err(|e| bad("recover", format!("{path}: {e}")))?;
-            (b, path.to_string())
+            (b, path.to_string(), Some(path.to_string()))
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -492,13 +596,21 @@ fn run_recover(s: &mut Session, p: &Value) -> Result<Value> {
         let data = str_param(p, "data").ok_or_else(|| bad("recover", "`path` or `data` (base64) is required"))?;
         let bytes = base64_decode(data).ok_or_else(|| bad("recover", "invalid base64"))?;
         let name = str_param(p, "name").unwrap_or("Recovered.dxf").to_string();
-        (bytes, name)
+        (bytes, name, None::<String>)
     };
     if bytes.len() > 512_000_000 {
         return Err(bad("recover", "file is too large to recover"));
     }
     let i = open_bytes(s, &bytes, &name, None)?;
-    let report = audit_drawing(s.doc_mut()?, fix);
+    // A recovery file is consumed by opening it: the next real save removes it.
+    // Only `.sv$` files are tagged (never a user's own drawing).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let (Some(src), Some(st)) = (source.filter(|p| p.to_ascii_lowercase().ends_with(".sv$")), s.docs.get_mut(i)) {
+        st.autosave_path = Some(src);
+    }
+    // A fresh import is clean; only borrow mutably when repairs are needed.
+    let issues = collect_issues(s.doc()?);
+    let report = if fix && !issues.is_empty() { apply_fixes(s.doc_mut()?, &issues) } else { report_issues(s.doc()?, &issues) };
     let entities = s.docs.get(i).map(|d| d.doc.entity_count()).unwrap_or(0);
     let mut v = audit_report_value(&report);
     v["index"] = json!(i);
@@ -554,8 +666,17 @@ mod tests {
     use cadcraft_doc::{Entity, EntityKind, Line};
     use cadcraft_geom::Vec3;
 
+    static TEST_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn test_session() -> Session {
-        Session::new()
+        // Unique titles: derived recovery paths land in the shared temp dir,
+        // so default Drawing1/Drawing2 names would collide across tests.
+        let mut s = Session::new();
+        let n = TEST_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(st) = s.docs.get_mut(0) {
+            st.title = format!("test-{}-{n}", std::process::id());
+        }
+        s
     }
 
     /// Test IO hooks (superset of the ones in `layout.rs` tests: same plot format so
@@ -605,6 +726,25 @@ mod tests {
         assert_eq!(recovery_name(""), "Drawing.sv$");
         assert_eq!(sibling_with_ext("a.dxf", "bak"), "a.bak");
         assert!(!recovery_name(&"x".repeat(500)).contains(".dxf"));
+    }
+
+    #[test]
+    fn clean_audit_never_dirties() {
+        // Regression: taking doc_mut() on a clean drawing clones the Arc and
+        // falsely marks it dirty (undo step, DBMOD, spurious autosaves).
+        let mut s = test_session();
+        let (rev0, undo0) = (s.state().unwrap().revision, s.state().unwrap().undo.len());
+        let r = s.execute("audit", &json!({})).unwrap();
+        assert_eq!(r["errors"], 0);
+        assert_eq!(r["fixed"], 0);
+        let st = s.state().unwrap();
+        assert!(!st.is_dirty(), "clean audit must not dirty the drawing");
+        assert_eq!(st.revision, rev0, "no revision bump");
+        assert_eq!(st.undo.len(), undo0, "no undo step");
+        let r = s.execute("audit", &json!({"fix": false})).unwrap();
+        assert_eq!(r["errors"], 0);
+        assert_eq!(r["fixed"], 0);
+        assert!(!s.state().unwrap().is_dirty());
     }
 
     #[test]
@@ -740,6 +880,11 @@ mod tests {
             ("autosave", json!({"minutes": "soon"})),
             ("autosave", json!({"minutes": 1e308})),
             ("autosave", json!({"path": long})),
+            ("autosave", json!({"all": "every"})),
+            ("autosave", json!({"all": true, "path": "x.sv$"})),
+            ("recovery.list", json!(null)),
+            ("recovery.list", json!({"dir": 42})),
+            ("recovery.list", json!({"dir": "/nonexistent-dir-xyz"})),
             ("recover", json!(null)),
             ("recover", json!({"data": "!!!not-base64!!!"})),
             ("recover", json!({"fix": false})),
@@ -751,5 +896,87 @@ mod tests {
         }
         // The session still works afterwards.
         assert!(s.execute("audit", &json!({})).is_ok());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn autosave_all_saves_every_dirty_drawing() {
+        install_fake_io();
+        let mut s = test_session();
+        if !writer_available(&mut s) {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cadcraft-allas-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // Unique titles: derived recovery paths land in the shared temp dir.
+        for (i, st) in s.docs.iter_mut().enumerate() {
+            st.title = format!("allas-{}-{i}", std::process::id());
+        }
+        // Two drawings with real paths (unique temp dir: no collisions).
+        for name in ["one.dxf", "two.dxf"] {
+            let path = dir.join(name).to_string_lossy().to_string();
+            s.execute("saveas", &json!({"path": path})).unwrap();
+            s.execute("new", &json!({})).unwrap();
+        }
+        // Dirty both drawings: active is the newest; switch to dirty the other too.
+        s.execute("line", &json!({"points": [[0, 0], [1, 1]]})).unwrap();
+        s.execute("document.switch", &json!({"index": 0})).unwrap();
+        s.execute("line", &json!({"points": [[2, 2], [3, 3]]})).unwrap();
+        assert_eq!(s.active, 0, "active drawing must not move");
+        let r = s.execute("autosave", &json!({"force": true, "all": true})).unwrap();
+        assert_eq!(r["autosaved"], true);
+        // Only the two drawings with real paths were dirty (the seed drawing is clean).
+        let files = r["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(s.active, 0, "active drawing still untouched");
+        for f in files {
+            assert!(std::fs::read(f["path"].as_str().unwrap()).unwrap().starts_with(b"fake"));
+        }
+        // A second sweep has nothing to do.
+        let r = s.execute("autosave", &json!({"force": true, "all": true})).unwrap();
+        assert_eq!(r["needed"], false);
+        // The untitled drawing autosaved to the shared temp dir: clean it up.
+        let _ = std::fs::remove_file(std::env::temp_dir().join("Drawing3.sv$"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_removes_its_recovery_file() {
+        install_fake_io();
+        let mut s = test_session();
+        if !writer_available(&mut s) {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cadcraft-svdel-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("plan.dxf").to_string_lossy().to_string();
+        s.execute("line", &json!({"points": [[0, 0], [1, 1]]})).unwrap();
+        s.execute("saveas", &json!({"path": path})).unwrap();
+        s.execute("line", &json!({"points": [[5, 5], [6, 6]]})).unwrap();
+        let sv = dir.join("plan.sv$").to_string_lossy().to_string();
+        s.execute("autosave", &json!({"force": true})).unwrap();
+        assert!(std::path::Path::new(&sv).exists());
+        s.execute("qsave", &json!({})).unwrap();
+        assert!(!std::path::Path::new(&sv).exists(), "real save clears recovery data");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn recovery_list_finds_sv_files() {
+        let mut s = test_session();
+        let dir = std::env::temp_dir().join(format!("cadcraft-reclist-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("a.sv$"), b"1").unwrap();
+        std::fs::write(dir.join("b.SV$"), b"12").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"zzz").unwrap();
+        let ds = dir.to_string_lossy().to_string();
+        let r = s.execute("recovery.list", &json!({"dir": ds})).unwrap();
+        let files = r["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2, "only .sv$ files, any case");
+        assert_eq!(r["dir"], ds.as_str());
+        assert!(s.execute("recovery.list", &json!({"dir": "/nonexistent-dir-xyz"})).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
